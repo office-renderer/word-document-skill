@@ -100,6 +100,7 @@ def section_signature(document: ET.Element) -> dict:
 
 
 def footer_signature(pkg: Package, document: ET.Element) -> dict:
+    """Return only footer semantics that affect the rendered page-number layout."""
     rels = pkg.xml("word/_rels/document.xml.rels")
     targets = {}
     for rel in rels:
@@ -117,24 +118,37 @@ def footer_signature(pkg: Package, document: ET.Element) -> dict:
         target = targets.get(rid)
         if not ftype or not target:
             continue
+
         member = "word/" + target.lstrip("/")
         if member not in pkg.names:
             continue
+
         root = pkg.xml(member)
         p = root.find("w:p", NS)
         ppr = p.find("w:pPr", NS) if p is not None else None
+
+        field_text = " ".join(
+            (x.text or "").strip()
+            for x in root.findall(".//w:instrText", NS)
+        )
+        field_tokens = field_text.upper().split()
+        has_page_field = "PAGE" in field_tokens
+
+        literal_text = "".join(
+            (t.text or "") for t in root.findall(".//w:t", NS)
+        )
+        literal_text = "".join(literal_text.split())
+
         result[ftype] = {
             "jc": w_attr(ppr.find("w:jc", NS), "val") if ppr is not None else None,
             "ind": attrs(
                 ppr.find("w:ind", NS) if ppr is not None else None,
                 ("left", "right"),
             ),
-            "text": "".join((t.text or "") for t in root.findall(".//w:t", NS)),
-            "field": " ".join(
-                (x.text or "").strip()
-                for x in root.findall(".//w:instrText", NS)
-            ).strip(),
+            "has_page_field": has_page_field,
+            "dash_count": literal_text.count("—"),
         }
+
     return result
 
 
@@ -146,6 +160,16 @@ def is_false(node: ET.Element | None) -> bool:
 
 def text_of(p: ET.Element) -> str:
     return "".join((t.text or "") for t in p.findall(".//w:t", NS)).strip()
+
+
+def is_vmerge_continuation(tc: ET.Element) -> bool:
+    """True for a vertical-merge continuation cell that Word does not render independently."""
+    tcpr = tc.find("w:tcPr", NS)
+    vmerge = tcpr.find("w:vMerge", NS) if tcpr is not None else None
+    if vmerge is None:
+        return False
+    value = w_attr(vmerge, "val")
+    return value in {None, "", "continue"}
 
 
 def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[dict], list[str]]:
@@ -310,6 +334,11 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
                 issues.append(issue("TBL-GRID-WIDTH", f"Table {t_idx} grid width is {total}", "table", table=t_idx, width=total))
 
         for c_idx, tc in enumerate(tbl.findall(".//w:tc", NS), 1):
+            # A vMerge continuation is not an independently rendered cell. Its hidden
+            # paragraph formatting must not fail the visible-table validation.
+            if is_vmerge_continuation(tc):
+                continue
+
             tcpr = tc.find("w:tcPr", NS)
             valign = tcpr.find("w:vAlign", NS) if tcpr is not None else None
             if w_attr(valign, "val") != rules["table"]["vertical_alignment"]:
