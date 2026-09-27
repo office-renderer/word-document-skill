@@ -25,6 +25,8 @@ PAGINATION_TAGS = ("widowControl", "keepNext", "keepLines", "pageBreakBefore")
 BODY_STYLE_NAME = "正文（默认）"
 NORMAL_STYLE_NAME = "Normal"
 BODY_FIRST_LINE_TWIPS = "640"
+TABLE_MAX_WIDTH = 8845
+TABLE_FONT_HALF_POINTS = 28
 
 CORE_STYLE_NAMES = [
     "Normal",
@@ -269,12 +271,80 @@ def _paragraph_text(p: ET.Element) -> str:
     return "".join((t.text or "") for t in p.findall(".//w:t", NS)).strip()
 
 
+
+def table_rule_errors(document_root: ET.Element) -> list[str]:
+    errors: list[str] = []
+    for t_idx, tbl in enumerate(document_root.findall(".//w:tbl", NS), 1):
+        tblpr = tbl.find("w:tblPr", NS)
+        tblw = tblpr.find("w:tblW", NS) if tblpr is not None else None
+        tblind = tblpr.find("w:tblInd", NS) if tblpr is not None else None
+        layout = tblpr.find("w:tblLayout", NS) if tblpr is not None else None
+
+        try:
+            preferred = int(w_attr(tblw, "w") or "0")
+        except ValueError:
+            preferred = 0
+        if w_attr(tblw, "type") == "dxa" and preferred > TABLE_MAX_WIDTH:
+            errors.append(f"table {t_idx}: preferred width {preferred} exceeds {TABLE_MAX_WIDTH} twips")
+        if w_attr(tblind, "w") not in {None, "0"}:
+            errors.append(f"table {t_idx}: table indent must be 0, got {w_attr(tblind, 'w')!r}")
+        if w_attr(layout, "type") != "fixed":
+            errors.append(f"table {t_idx}: tblLayout must be fixed")
+
+        grid = tbl.find("w:tblGrid", NS)
+        if grid is not None:
+            total = 0
+            for col in grid.findall("w:gridCol", NS):
+                try:
+                    total += int(w_attr(col, "w") or "0")
+                except ValueError:
+                    pass
+            if total > TABLE_MAX_WIDTH:
+                errors.append(f"table {t_idx}: grid width {total} exceeds {TABLE_MAX_WIDTH} twips")
+
+        for c_idx, tc in enumerate(tbl.findall(".//w:tc", NS), 1):
+            tcpr = tc.find("w:tcPr", NS)
+            valign = tcpr.find("w:vAlign", NS) if tcpr is not None else None
+            if w_attr(valign, "val") != "center":
+                errors.append(f"table {t_idx} cell {c_idx}: vertical alignment must be center")
+
+            for p_idx, p in enumerate(tc.findall("w:p", NS), 1):
+                ppr = p.find("w:pPr", NS)
+                jc = ppr.find("w:jc", NS) if ppr is not None else None
+                ind = ppr.find("w:ind", NS) if ppr is not None else None
+                if w_attr(jc, "val") != "center":
+                    errors.append(f"table {t_idx} cell {c_idx} paragraph {p_idx}: alignment must be center")
+                if ind is None or any(
+                    w_attr(ind, key) not in {None, "0"}
+                    for key in ("left", "right", "firstLine", "hanging", "leftChars", "rightChars", "firstLineChars", "hangingChars")
+                ):
+                    errors.append(f"table {t_idx} cell {c_idx} paragraph {p_idx}: indentation must be zero")
+
+                for r_idx, run in enumerate(p.findall("w:r", NS), 1):
+                    if not "".join((t.text or "") for t in run.findall(".//w:t", NS)):
+                        continue
+                    rpr = run.find("w:rPr", NS)
+                    sz = rpr.find("w:sz", NS) if rpr is not None else None
+                    szcs = rpr.find("w:szCs", NS) if rpr is not None else None
+                    try:
+                        v1 = int(w_attr(sz, "val") or "0")
+                        v2 = int(w_attr(szcs, "val") or "0")
+                    except ValueError:
+                        v1 = v2 = 0
+                    if v1 < TABLE_FONT_HALF_POINTS or v2 < TABLE_FONT_HALF_POINTS:
+                        errors.append(
+                            f"table {t_idx} cell {c_idx} paragraph {p_idx} run {r_idx}: font size must be at least 14 pt"
+                        )
+    return errors
+
+
 def persistent_rule_errors(path: Path) -> list[str]:
     errors: list[str] = []
     with zipfile.ZipFile(path) as zf:
         styles = read_xml(zf, "word/styles.xml")
         document = read_xml(zf, "word/document.xml")
         by_id, by_name = style_catalog(styles)
+        errors.extend(table_rule_errors(document))
 
         for style in styles.findall("w:style", NS):
             if w_attr(style, "type") != "paragraph":
