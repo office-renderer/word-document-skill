@@ -16,6 +16,28 @@ Treat `assets/公文排版Word模板.dotx` as the authoritative formatting sourc
 5. Apply only requested content/format changes. Do not “beautify” the document by changing template-defined margins, typefaces, heading sizes, paragraph spacing, line spacing, or page-number layout without an explicit instruction.
 6. Let an explicit user instruction override the corresponding template rule. Keep all unaffected template rules intact.
 7. Do not bundle, copy, or redistribute font files. Refer to fonts by name only.
+8. Ordinary body prose MUST use the template paragraph style `正文（默认）`. Do not leave normal body paragraphs on `Normal` or an unstyled paragraph.
+9. The body first-line indent MUST come from `正文（默认）`, whose template value is `640` twips (about two Chinese characters at 16 pt). Do not add a direct first-line/hanging-indent override to body paragraphs.
+10. Disable all Word paragraph pagination controls everywhere: widow/orphan control, keep with next, keep lines together, and page break before. This persistent rule overrides inherited/template pagination values.
+
+## Mandatory normalization
+
+The black square shown in Word's left margin is a paragraph line/page-break formatting marker, not a bullet. Final documents made with this skill must not show that marker because all four paragraph pagination options are forced off.
+
+After creating a new document or substantially reformatting an existing one, run:
+
+```bash
+python scripts/normalize_docx.py /path/to/output.docx --in-place
+```
+
+This normalization step:
+
+- maps ordinary long body prose that is `Normal`/unstyled onto `正文（默认）`;
+- removes direct first-line/hanging indentation from those body paragraphs so the template controls the two-character first-line indent;
+- explicitly disables widow/orphan control, keep with next, keep lines together, and page break before on all paragraph styles;
+- turns off any direct paragraph pagination override that would re-enable those options.
+
+Run normalization before structural validation.
 
 ## Style hierarchy
 
@@ -36,8 +58,10 @@ Read `references/template-spec.md` when exact font, size, spacing, margin, foote
 1. Start from `assets/公文排版Word模板.dotx` so the package keeps the original styles, settings, and odd/even footers.
 2. Replace the template's demonstration text with the requested content; do not leave sample paragraphs in the final deliverable.
 3. If the chosen library cannot directly instantiate `.dotx`, create a working OOXML copy and convert the package's main content type from Word template to Word document before editing. Do not rebuild the document styles from scratch merely to work around `.dotx` handling.
-4. Map paragraphs to the template styles instead of applying equivalent direct formatting where a matching style already exists.
-5. Preserve the `PAGE` field in the odd/even footer pair.
+4. Map paragraphs to the template styles instead of applying equivalent direct formatting where a matching style already exists. Ordinary body prose must use `正文（默认）`.
+5. Do not set body first-line indentation directly. Let `正文（默认）` supply the `640` twip indent.
+6. Run `python scripts/normalize_docx.py /path/to/output.docx --in-place`.
+7. Preserve the `PAGE` field in the odd/even footer pair.
 
 ## Existing document workflow
 
@@ -45,12 +69,14 @@ Read `references/template-spec.md` when exact font, size, spacing, margin, foote
 2. Make minimal, structure-preserving edits. Avoid rebuilding the whole DOCX from extracted text.
 3. When the user requests this template's formatting, migrate paragraph semantics onto the template's styles and page settings while preserving non-text objects and intentional section-specific exceptions.
 4. Keep mixed-orientation or special sections only when they already exist for a reason or the user requests them. The base/default section should still follow the template unless overridden.
+5. When applying this skill's formatting rules, run the normalization script before validation so body indentation and pagination controls are normalized consistently.
 
 ## Validation
 
-Run the bundled structural validator after creating or substantially reformatting a Word document:
+Run normalization first, then the bundled structural validator after creating or substantially reformatting a Word document:
 
 ```bash
+python scripts/normalize_docx.py /path/to/output.docx --in-place
 python scripts/validate_docx.py /path/to/output.docx
 ```
 

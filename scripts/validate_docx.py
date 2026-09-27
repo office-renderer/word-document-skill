@@ -21,6 +21,11 @@ NS = {"w": W_NS, "r": R_NS}
 W = "{" + W_NS + "}"
 R = "{" + R_NS + "}"
 
+PAGINATION_TAGS = ("widowControl", "keepNext", "keepLines", "pageBreakBefore")
+BODY_STYLE_NAME = "正文（默认）"
+NORMAL_STYLE_NAME = "Normal"
+BODY_FIRST_LINE_TWIPS = "640"
+
 CORE_STYLE_NAMES = [
     "Normal",
     "正文（默认）",
@@ -106,7 +111,6 @@ def style_signature(style: ET.Element, by_id: dict[str, ET.Element]) -> dict:
             "outline": w_attr(outline, "val"),
             "num": {"ilvl": w_attr(ilvl, "val"), "numId": w_attr(numid, "val")},
             "tabs": tabs,
-            "widowControl": w_attr(ppr.find("w:widowControl", NS), "val") if ppr is not None else None,
             "wordWrap": w_attr(ppr.find("w:wordWrap", NS), "val") if ppr is not None else None,
             "adjustRightInd": w_attr(ppr.find("w:adjustRightInd", NS), "val") if ppr is not None else None,
             "snapToGrid": w_attr(ppr.find("w:snapToGrid", NS), "val") if ppr is not None else None,
@@ -254,8 +258,85 @@ def compare(expected, actual, path="") -> list[str]:
     return errors
 
 
+
+def _is_false(node: ET.Element | None) -> bool:
+    if node is None:
+        return False
+    return (w_attr(node, "val") or "true").lower() in {"0", "false", "off"}
+
+
+def _paragraph_text(p: ET.Element) -> str:
+    return "".join((t.text or "") for t in p.findall(".//w:t", NS)).strip()
+
+
+def persistent_rule_errors(path: Path) -> list[str]:
+    errors: list[str] = []
+    with zipfile.ZipFile(path) as zf:
+        styles = read_xml(zf, "word/styles.xml")
+        document = read_xml(zf, "word/document.xml")
+        by_id, by_name = style_catalog(styles)
+
+        for style in styles.findall("w:style", NS):
+            if w_attr(style, "type") != "paragraph":
+                continue
+            name = w_attr(style.find("w:name", NS), "val") or w_attr(style, "styleId") or "<unnamed>"
+            ppr = style.find("w:pPr", NS)
+            for tag in PAGINATION_TAGS:
+                node = ppr.find(f"w:{tag}", NS) if ppr is not None else None
+                if not _is_false(node):
+                    errors.append(f"pagination style {name}.{tag}: must be explicitly disabled")
+
+        body_style = by_name.get(BODY_STYLE_NAME)
+        body_id = w_attr(body_style, "styleId") if body_style is not None else None
+        if body_style is None:
+            errors.append(f"required body style missing: {BODY_STYLE_NAME}")
+        else:
+            ind = body_style.find("w:pPr/w:ind", NS)
+            if w_attr(ind, "firstLine") != BODY_FIRST_LINE_TWIPS:
+                errors.append(f"body style firstLine: expected {BODY_FIRST_LINE_TWIPS}, got {w_attr(ind, 'firstLine')!r}")
+            if w_attr(ind, "hanging") is not None or w_attr(ind, "hangingChars") is not None:
+                errors.append("body style must not use hanging indentation")
+
+        for idx, p in enumerate(document.findall(".//w:p", NS), 1):
+            ppr = p.find("w:pPr", NS)
+            if ppr is None:
+                continue
+            for tag in PAGINATION_TAGS:
+                node = ppr.find(f"w:{tag}", NS)
+                if node is not None and not _is_false(node):
+                    errors.append(f"paragraph {idx} {tag}: enabled ({_paragraph_text(p)[:24]!r})")
+
+        body = document.find("w:body", NS)
+        if body is not None and body_id:
+            for idx, p in enumerate(body.findall("w:p", NS), 1):
+                text = _paragraph_text(p)
+                if len(text) < 12:
+                    continue
+                ppr = p.find("w:pPr", NS)
+                jc = ppr.find("w:jc", NS) if ppr is not None else None
+                if w_attr(jc, "val") in {"center", "right"}:
+                    continue
+                pstyle = ppr.find("w:pStyle", NS) if ppr is not None else None
+                sid = w_attr(pstyle, "val")
+                style_name = None
+                if sid in by_id:
+                    style_name = w_attr(by_id[sid].find("w:name", NS), "val")
+                elif sid is None:
+                    style_name = NORMAL_STYLE_NAME
+                if style_name == NORMAL_STYLE_NAME:
+                    errors.append(f"body paragraph {idx}: uses Normal/unstyled instead of {BODY_STYLE_NAME} ({text[:24]!r})")
+                if sid == body_id and ppr is not None:
+                    ind = ppr.find("w:ind", NS)
+                    if ind is not None and any(
+                        w_attr(ind, key) is not None
+                        for key in ("firstLine", "firstLineChars", "hanging", "hangingChars")
+                    ):
+                        errors.append(f"body paragraph {idx}: direct indentation overrides {BODY_STYLE_NAME} ({text[:24]!r})")
+    return errors
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate DOCX/DOTX formatting structure against the bundled template.")
+    parser = argparse.ArgumentParser(description="Validate DOCX/DOTX formatting against the bundled template plus body-indent and pagination rules.")
     parser.add_argument("document", type=Path, help="DOCX/DOTX file to validate")
     parser.add_argument(
         "--template",
@@ -273,6 +354,7 @@ def main() -> int:
             print(json.dumps(actual, ensure_ascii=False, indent=2))
             return 0
         expected = build_profile(args.template)
+        rule_errors = persistent_rule_errors(args.document)
     except ValueError as exc:
         if args.json:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
@@ -285,7 +367,7 @@ def main() -> int:
     expected_cmp.pop("section_count", None)
     actual_cmp.pop("section_count", None)
 
-    errors = compare(expected_cmp, actual_cmp)
+    errors = compare(expected_cmp, actual_cmp) + rule_errors
     warnings = []
     if actual.get("section_count", 1) > 1:
         warnings.append(

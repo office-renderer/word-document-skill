@@ -1,6 +1,18 @@
 # 公文排版Word模板.dotx 版式规范
 
-本文件用于解释和核验 `assets/公文排版Word模板.dotx`。模板文件本身是最终权威来源；若模板以后被更新，应重新核验本说明，而不是让旧说明反向覆盖新模板。
+本文件用于解释和核验 `assets/公文排版Word模板.dotx`。除下述“Skill 强制覆盖项”外，模板文件本身是最终权威来源；若模板以后被更新，应重新核验本说明，而不是让旧说明反向覆盖新模板。
+
+## 0. Skill 强制覆盖项
+
+以下规则来自实际生成结果反馈，优先于模板中可能存在的继承值：
+
+- 普通正文段落必须使用 `正文（默认）`，不能使用 `Normal` 或无样式正文。
+- 正文首行缩进由 `正文（默认）` 统一控制：`firstLine=640` twips，约为三号字下 2 个汉字。正文段落不得再叠加直接 `firstLine` / `firstLineChars` / `hanging` / `hangingChars`。
+- Word“换行和分页”中的四项全部关闭：孤行控制（widow/orphan control）、与下段同页（keep with next）、段中不分页（keep lines together）、段前分页（page break before）。
+- 上述四项不仅不能在单个段落中重新启用，也应在所有段落样式上显式关闭，避免通过样式继承重新出现。
+- Word 左侧的小黑方块属于段落“换行和分页”属性提示，不是项目符号；按本 Skill 生成的最终文档不应出现该标记。
+
+生成或大幅重新排版 Word 后，应先运行 `scripts/normalize_docx.py`，再运行 `scripts/validate_docx.py`。
 
 ## 1. 页面与版心
 
@@ -28,13 +40,14 @@
 
 - 中文字体：仿宋_GB2312。
 - ASCII / hAnsi / cs：Times New Roman。
-- 首行缩进：`firstLineChars=200`，即 2 个字符；XML 同时保留一个兼容性的 `firstLine=200` 值，以字符缩进语义为准。
+- 模板内部可见 `firstLineChars=200`，并同时保留兼容性的 `firstLine=200`。**该样式不作为普通正文样式使用**，否则不同生成库/Word 解析路径可能把字符缩进与 twips 缩进处理得不一致，造成正文首行缩进漂移。
 - 关闭 widowControl、wordWrap、adjustRightInd、snapToGrid 的相关模板值应保持不变，除非修改任务明确需要改变。
 
-模板还包含 `正文（默认）` 样式：
+模板还包含 `正文（默认）` 样式，且它是本 Skill 唯一指定的普通正文样式：
 
 - 中文仿宋_GB2312，西文 Times New Roman。
 - `firstLine=640` twips（对应 16 pt 字号下约 2 个汉字宽度）。
+- 正文段落不得用直接格式覆盖上述首行缩进。
 
 ## 3. 标题层级映射
 
