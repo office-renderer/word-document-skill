@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Safely normalize Word body/table formatting without reserializing OOXML with ElementTree.
-
-This script deliberately uses python-docx/lxml so existing OOXML namespaces, mc:Ignorable
-prefixes, relationships, fields, drawings, bookmarks, and other unsupported elements remain
-on their original XML trees. It then strips embedded Word document-property metadata and performs package/XML/reopen
-checks before replacing an in-place document.
-"""
+"""Normalize mechanically enforceable Word rules from config/rules.json."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import tempfile
 import zipfile
@@ -23,26 +18,17 @@ from docx.oxml.ns import qn
 from docx.shared import Pt
 from lxml import etree
 
-BODY_STYLE = "正文（默认）"
-TABLE_STYLE = "表格正文"
-BODY_FIRST_LINE_PT = 32
-TABLE_FONT_PT = 14
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_RULES = ROOT / "config" / "rules.json"
 TWIP_EMU = 635
 
-METADATA_PARTS = {
-    "docProps/core.xml",
-    "docProps/app.xml",
-    "docProps/custom.xml",
-}
-METADATA_REL_TYPES = {
-    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties",
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties",
-}
+
+def load_rules(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def set_pagination_off(fmt) -> None:
-    """Uncheck all four Word line/page-break paragraph options."""
     fmt.keep_with_next = False
     fmt.keep_together = False
     fmt.page_break_before = False
@@ -50,7 +36,6 @@ def set_pagination_off(fmt) -> None:
 
 
 def set_indentation_zero(paragraph_or_style) -> None:
-    """Explicitly block both twip- and character-based indent inheritance."""
     fmt = paragraph_or_style.paragraph_format
     fmt.left_indent = Pt(0)
     fmt.right_indent = Pt(0)
@@ -69,7 +54,6 @@ def set_indentation_zero(paragraph_or_style) -> None:
     ):
         ind.set(qn(f"w:{name}"), "0")
 
-    # firstLine and hanging are mutually exclusive; remove hanging rather than writing both.
     for name in ("hanging", "hangingChars"):
         ind.attrib.pop(qn(f"w:{name}"), None)
 
@@ -84,26 +68,23 @@ def iter_table_paragraphs(table):
 
 def iter_all_paragraphs(doc):
     yield from doc.paragraphs
-
     for table in doc.tables:
         yield from iter_table_paragraphs(table)
-
     for section in doc.sections:
-        parts = (
+        for part in (
             section.header,
             section.footer,
             section.first_page_header,
             section.first_page_footer,
             section.even_page_header,
             section.even_page_footer,
-        )
-        for part in parts:
+        ):
             yield from part.paragraphs
             for table in part.tables:
                 yield from iter_table_paragraphs(table)
 
 
-def usable_width_twips(doc) -> int:
+def usable_width_twips(doc, configured_max: int) -> int:
     widths = []
     for section in doc.sections:
         if (
@@ -112,26 +93,24 @@ def usable_width_twips(doc) -> int:
             or section.right_margin is None
         ):
             continue
-        usable = int(
+        value = int(
             (section.page_width - section.left_margin - section.right_margin)
             / TWIP_EMU
         )
-        if usable > 0:
-            widths.append(usable)
-    return min(widths) if widths else 8845
+        if value > 0:
+            widths.append(value)
+    return min([configured_max, *widths]) if widths else configured_max
 
 
-def normalize_table(table, table_style, max_width_twips: int) -> None:
-    """Constrain width and normalize cell paragraph formatting."""
+def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
     table.autofit = False
 
     tbl_pr = table._tbl.tblPr
     tbl_w = tbl_pr.first_child_found_in("w:tblW")
     if tbl_w is not None:
         tbl_w.set(qn("w:type"), "dxa")
-        tbl_w.set(qn("w:w"), str(max_width_twips))
+        tbl_w.set(qn("w:w"), str(max_width))
 
-    # Do not add tblInd when it is absent; default is already zero.
     tbl_ind = tbl_pr.first_child_found_in("w:tblInd")
     if tbl_ind is not None:
         tbl_ind.set(qn("w:type"), "dxa")
@@ -146,23 +125,19 @@ def normalize_table(table, table_style, max_width_twips: int) -> None:
             widths.append(0)
 
     total = sum(widths)
-    if widths and total > max_width_twips and total > 0:
+    if widths and total > max_width and total > 0:
         scaled = []
         used = 0
         for index, width in enumerate(widths):
             if index == len(widths) - 1:
-                new_width = max_width_twips - used
+                new_width = max_width - used
             else:
-                new_width = max(
-                    1, round(width * max_width_twips / total)
-                )
+                new_width = max(1, round(width * max_width / total))
                 used += new_width
             scaled.append(new_width)
-
         for col, width in zip(grid_cols, scaled):
             col.set(qn("w:w"), str(width))
 
-    # Merged cells can be returned repeatedly by python-docx; process each tc only once.
     seen_cells = set()
     for row in table.rows:
         for cell in row.cells:
@@ -173,7 +148,6 @@ def normalize_table(table, table_style, max_width_twips: int) -> None:
 
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
-            # Let tblGrid control width so a long cell cannot expand the whole table.
             tcw = cell._tc.get_or_add_tcPr().get_or_add_tcW()
             tcw.set(qn("w:type"), "auto")
             tcw.set(qn("w:w"), "0")
@@ -183,18 +157,18 @@ def normalize_table(table, table_style, max_width_twips: int) -> None:
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 set_indentation_zero(paragraph)
                 set_pagination_off(paragraph.paragraph_format)
-
                 for run in paragraph.runs:
                     if run.text:
-                        run.font.size = Pt(TABLE_FONT_PT)
+                        run.font.size = Pt(rules["table"]["font_pt"])
 
             for nested in cell.tables:
-                normalize_table(nested, table_style, max_width_twips)
+                normalize_table(nested, table_style, rules, max_width)
 
 
+def strip_package_metadata(path: Path, rules: dict) -> None:
+    remove_parts = set(rules["metadata"]["remove_parts"])
+    rel_types = set(rules["metadata"]["relationship_types"])
 
-def strip_package_metadata(path: Path) -> None:
-    """Remove embedded Word file-property metadata from the final DOCX package."""
     fd, temp_name = tempfile.mkstemp(
         prefix=path.stem + ".metadata-",
         suffix=path.suffix,
@@ -207,8 +181,7 @@ def strip_package_metadata(path: Path) -> None:
         with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(temp_path, "w") as zout:
             for info in zin.infolist():
                 name = info.filename
-
-                if name in METADATA_PARTS:
+                if name in remove_parts:
                     continue
 
                 data = zin.read(name)
@@ -218,29 +191,19 @@ def strip_package_metadata(path: Path) -> None:
                     for rel in list(root):
                         rel_type = rel.get("Type", "")
                         target = rel.get("Target", "").lstrip("/")
-                        if (
-                            rel_type in METADATA_REL_TYPES
-                            or target in METADATA_PARTS
-                        ):
+                        if rel_type in rel_types or target in remove_parts:
                             root.remove(rel)
                     data = etree.tostring(
-                        root,
-                        xml_declaration=True,
-                        encoding="UTF-8",
-                        standalone=True,
+                        root, xml_declaration=True, encoding="UTF-8", standalone=True
                     )
 
                 elif name == "[Content_Types].xml":
                     root = etree.fromstring(data)
                     for child in list(root):
-                        part_name = child.get("PartName", "").lstrip("/")
-                        if part_name in METADATA_PARTS:
+                        if child.get("PartName", "").lstrip("/") in remove_parts:
                             root.remove(child)
                     data = etree.tostring(
-                        root,
-                        xml_declaration=True,
-                        encoding="UTF-8",
-                        standalone=True,
+                        root, xml_declaration=True, encoding="UTF-8", standalone=True
                     )
 
                 zout.writestr(info, data)
@@ -251,116 +214,105 @@ def strip_package_metadata(path: Path) -> None:
             temp_path.unlink()
 
 
-def verify_output(path: Path) -> None:
-    """Fail before replacement if the generated package is structurally unreadable."""
+def quick_safety_check(path: Path, rules: dict) -> None:
+    required = rules["validation"]["quick_required_parts"]
     with zipfile.ZipFile(path, "r") as zf:
-        bad_member = zf.testzip()
-        if bad_member:
-            raise RuntimeError(
-                f"corrupt ZIP member after normalization: {bad_member}"
-            )
-
-        for name in zf.namelist():
+        names = set(zf.namelist())
+        missing = [name for name in required if name not in names]
+        if missing:
+            raise RuntimeError(f"missing required OOXML parts: {missing}")
+        for name in required:
             if name.endswith((".xml", ".rels")):
-                try:
-                    etree.fromstring(zf.read(name))
-                except etree.XMLSyntaxError as exc:
-                    raise RuntimeError(
-                        f"invalid OOXML part after normalization: {name}: {exc}"
-                    ) from exc
+                etree.fromstring(zf.read(name))
+        for name in rules["metadata"]["remove_parts"]:
+            if name in names:
+                raise RuntimeError(f"metadata part remains after cleanup: {name}")
 
-    # A second python-docx open catches package/relationship/content-type failures.
     Document(path)
 
 
-def normalize(src: Path, dst: Path) -> None:
+def normalize(src: Path, dst: Path, rules: dict) -> None:
     doc = Document(src)
 
+    body_name = rules["body"]["style"]
     try:
-        body_style = doc.styles[BODY_STYLE]
+        body_style = doc.styles[body_name]
     except KeyError as exc:
-        raise RuntimeError(f"missing required style: {BODY_STYLE}") from exc
+        raise RuntimeError(f"missing required style: {body_name}") from exc
 
-    body_style.paragraph_format.first_line_indent = Pt(BODY_FIRST_LINE_PT)
+    body_style.paragraph_format.first_line_indent = Pt(
+        rules["body"]["first_line_pt"]
+    )
 
+    table_name = rules["table"]["paragraph_style"]
     try:
-        table_style = doc.styles[TABLE_STYLE]
+        table_style = doc.styles[table_name]
     except KeyError:
-        table_style = doc.styles.add_style(
-            TABLE_STYLE, WD_STYLE_TYPE.PARAGRAPH
-        )
+        table_style = doc.styles.add_style(table_name, WD_STYLE_TYPE.PARAGRAPH)
         table_style.base_style = body_style
 
-    table_style.font.size = Pt(TABLE_FONT_PT)
+    table_style.font.size = Pt(rules["table"]["font_pt"])
     table_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_indentation_zero(table_style)
     set_pagination_off(table_style.paragraph_format)
 
-    # Explicitly disable all four pagination options on every paragraph style.
     for style in doc.styles:
         if style.type == WD_STYLE_TYPE.PARAGRAPH:
             set_pagination_off(style.paragraph_format)
 
-    # Main-body Normal prose becomes the canonical body style.
-    # doc.paragraphs does not include table-cell paragraphs.
+    auto_from = set(rules["body"]["auto_map_from_styles"])
+    min_chars = int(rules["body"]["auto_map_min_chars"])
     for paragraph in doc.paragraphs:
         text = paragraph.text.strip()
-        style_name = (
-            paragraph.style.name
-            if paragraph.style is not None
-            else "Normal"
-        )
+        style_name = paragraph.style.name if paragraph.style is not None else "Normal"
         if (
-            len(text) >= 12
+            len(text) >= min_chars
+            and style_name in auto_from | {body_name}
             and paragraph.alignment
             not in (WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)
-            and style_name in {"Normal", BODY_STYLE}
         ):
             paragraph.style = body_style
-            # Remove direct indentation so 正文（默认） supplies 640 twips.
             paragraph.paragraph_format.left_indent = None
             paragraph.paragraph_format.right_indent = None
             paragraph.paragraph_format.first_line_indent = None
 
-    # Direct paragraph formatting must not re-enable pagination.
     for paragraph in iter_all_paragraphs(doc):
         set_pagination_off(paragraph.paragraph_format)
 
-    max_width = usable_width_twips(doc)
+    max_width = usable_width_twips(doc, int(rules["table"]["max_width_twips"]))
     for table in doc.tables:
-        normalize_table(table, table_style, max_width)
+        normalize_table(table, table_style, rules, max_width)
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     doc.save(dst)
-    strip_package_metadata(dst)
-    verify_output(dst)
+    strip_package_metadata(dst, rules)
+    quick_safety_check(dst, rules)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Safely normalize body indentation, pagination options, "
-            "table formatting, and metadata sanitization in DOCX."
-        )
+        description="Normalize Word formatting and metadata using config/rules.json."
     )
     parser.add_argument("document", type=Path)
+    parser.add_argument("--rules", type=Path, default=DEFAULT_RULES)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--in-place", action="store_true")
     group.add_argument("--out", type=Path)
     args = parser.parse_args()
 
+    rules = load_rules(args.rules)
+
     if args.in_place:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir) / args.document.name
-            normalize(args.document, temp_path)
-            # Only replace the original after every verification step has passed.
+            normalize(args.document, temp_path, rules)
             os.replace(temp_path, args.document)
         target = args.document
     else:
-        normalize(args.document, args.out)
+        normalize(args.document, args.out, rules)
         target = args.out
 
-    print(f"Normalized and verified: {target}")
+    print(f"Normalized: {target}")
     return 0
 
 

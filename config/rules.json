@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "template_path": "assets/公文排版Word模板.dotx",
+  "body": {
+    "style": "正文（默认）",
+    "first_line_pt": 32,
+    "first_line_twips": 640,
+    "auto_map_from_styles": [
+      "Normal"
+    ],
+    "auto_map_min_chars": 12
+  },
+  "pagination": {
+    "widow_control": false,
+    "keep_with_next": false,
+    "keep_together": false,
+    "page_break_before": false
+  },
+  "table": {
+    "paragraph_style": "表格正文",
+    "font_pt": 14,
+    "font_half_points": 28,
+    "max_width_twips": 8845,
+    "fixed_layout": true,
+    "horizontal_alignment": "center",
+    "vertical_alignment": "center",
+    "zero_indentation": true
+  },
+  "metadata": {
+    "remove_parts": [
+      "docProps/core.xml",
+      "docProps/app.xml",
+      "docProps/custom.xml"
+    ],
+    "relationship_types": [
+      "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties",
+      "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",
+      "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties"
+    ]
+  },
+  "validation": {
+    "template_compare_styles": [
+      "Normal",
+      "正文（默认）",
+      "公文标题",
+      "一级标题",
+      "二级标题",
+      "三级标题",
+      "四级标题",
+      "heading 1",
+      "heading 2",
+      "heading 3",
+      "heading 4",
+      "heading 5",
+      "TOC Heading",
+      "目录标题",
+      "TOC 11",
+      "目录一级条目",
+      "TOC 21",
+      "目录二级条目",
+      "TOC 31",
+      "目录三级条目"
+    ],
+    "quick_required_parts": [
+      "[Content_Types].xml",
+      "_rels/.rels",
+      "word/document.xml",
+      "word/styles.xml",
+      "word/settings.xml",
+      "word/_rels/document.xml.rels"
+    ]
+  }
+}

@@ -1,4 +1,4 @@
 interface:
   display_name: "Word 文档模板"
-  short_description: "按内置 Word 模板创建、修改并校验文档版式"
-  default_prompt: "Use $word-document-skill to create or revise this Word document while preserving the bundled template's formatting rules."
+  short_description: "基于固定模板生成、规范化并校验 Word"
+  default_prompt: "Use $word-document-skill. Keep the workflow short: edit the document, run normalize, then quick validate. Read content-rules only when drafting or rewriting text; use strict validation or PDF rendering only when needed."
