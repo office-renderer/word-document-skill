@@ -22,17 +22,25 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RULES = ROOT / "config" / "rules.json"
 TWIP_EMU = 635
 
+PARAGRAPH_ALIGNMENTS = {"center": WD_ALIGN_PARAGRAPH.CENTER}
+VERTICAL_ALIGNMENTS = {"center": WD_CELL_VERTICAL_ALIGNMENT.CENTER}
+
 
 def load_rules(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def set_pagination_off(fmt) -> None:
-    fmt.keep_with_next = False
-    fmt.keep_together = False
-    fmt.page_break_before = False
-    fmt.widow_control = False
+def apply_pagination_rules(fmt, rules: dict) -> None:
+    for name in rules["pagination"]["disable"]:
+        setattr(fmt, name, False)
+
+
+def clear_direct_pagination_overrides(fmt, rules: dict) -> None:
+    # Missing direct properties already inherit the style; only neutralize actual True overrides.
+    for name in rules["pagination"]["disable"]:
+        if getattr(fmt, name) is True:
+            setattr(fmt, name, False)
 
 
 def set_indentation_zero(paragraph_or_style) -> None:
@@ -103,7 +111,7 @@ def usable_width_twips(doc, configured_max: int) -> int:
 
 
 def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
-    table.autofit = False
+    table.autofit = rules["table"]["layout"] != "fixed"
 
     tbl_pr = table._tbl.tblPr
     tbl_w = tbl_pr.first_child_found_in("w:tblW")
@@ -138,6 +146,9 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
         for col, width in zip(grid_cols, scaled):
             col.set(qn("w:w"), str(width))
 
+    h_align = PARAGRAPH_ALIGNMENTS[rules["table"]["horizontal_alignment"]]
+    v_align = VERTICAL_ALIGNMENTS[rules["table"]["vertical_alignment"]]
+
     seen_cells = set()
     for row in table.rows:
         for cell in row.cells:
@@ -146,7 +157,7 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
                 continue
             seen_cells.add(key)
 
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            cell.vertical_alignment = v_align
 
             tcw = cell._tc.get_or_add_tcPr().get_or_add_tcW()
             tcw.set(qn("w:type"), "auto")
@@ -154,9 +165,10 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
 
             for paragraph in cell.paragraphs:
                 paragraph.style = table_style
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                set_indentation_zero(paragraph)
-                set_pagination_off(paragraph.paragraph_format)
+                paragraph.alignment = h_align
+                if rules["table"]["zero_indentation"]:
+                    set_indentation_zero(paragraph)
+                clear_direct_pagination_overrides(paragraph.paragraph_format, rules)
                 for run in paragraph.runs:
                     if run.text:
                         run.font.size = Pt(rules["table"]["font_pt"])
@@ -241,7 +253,7 @@ def normalize(src: Path, dst: Path, rules: dict) -> None:
         raise RuntimeError(f"missing required style: {body_name}") from exc
 
     body_style.paragraph_format.first_line_indent = Pt(
-        rules["body"]["first_line_pt"]
+        rules["body"]["first_line_twips"] / 20
     )
 
     table_name = rules["table"]["paragraph_style"]
@@ -252,13 +264,16 @@ def normalize(src: Path, dst: Path, rules: dict) -> None:
         table_style.base_style = body_style
 
     table_style.font.size = Pt(rules["table"]["font_pt"])
-    table_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    set_indentation_zero(table_style)
-    set_pagination_off(table_style.paragraph_format)
+    table_style.paragraph_format.alignment = PARAGRAPH_ALIGNMENTS[
+        rules["table"]["horizontal_alignment"]
+    ]
+    if rules["table"]["zero_indentation"]:
+        set_indentation_zero(table_style)
+    apply_pagination_rules(table_style.paragraph_format, rules)
 
     for style in doc.styles:
         if style.type == WD_STYLE_TYPE.PARAGRAPH:
-            set_pagination_off(style.paragraph_format)
+            apply_pagination_rules(style.paragraph_format, rules)
 
     auto_from = set(rules["body"]["auto_map_from_styles"])
     min_chars = int(rules["body"]["auto_map_min_chars"])
@@ -277,7 +292,7 @@ def normalize(src: Path, dst: Path, rules: dict) -> None:
             paragraph.paragraph_format.first_line_indent = None
 
     for paragraph in iter_all_paragraphs(doc):
-        set_pagination_off(paragraph.paragraph_format)
+        clear_direct_pagination_overrides(paragraph.paragraph_format, rules)
 
     max_width = usable_width_twips(doc, int(rules["table"]["max_width_twips"]))
     for table in doc.tables:

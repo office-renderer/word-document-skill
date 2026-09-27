@@ -3,7 +3,6 @@
   "template_path": "assets/公文排版Word模板.dotx",
   "body": {
     "style": "正文（默认）",
-    "first_line_pt": 32,
     "first_line_twips": 640,
     "auto_map_from_styles": [
       "Normal"
@@ -11,17 +10,18 @@
     "auto_map_min_chars": 12
   },
   "pagination": {
-    "widow_control": false,
-    "keep_with_next": false,
-    "keep_together": false,
-    "page_break_before": false
+    "disable": [
+      "widow_control",
+      "keep_with_next",
+      "keep_together",
+      "page_break_before"
+    ]
   },
   "table": {
     "paragraph_style": "表格正文",
     "font_pt": 14,
-    "font_half_points": 28,
     "max_width_twips": 8845,
-    "fixed_layout": true,
+    "layout": "fixed",
     "horizontal_alignment": "center",
     "vertical_alignment": "center",
     "zero_indentation": true

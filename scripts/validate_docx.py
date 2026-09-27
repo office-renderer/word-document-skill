@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import sys
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -21,7 +20,12 @@ W = "{" + W_NS + "}"
 R = "{" + R_NS + "}"
 NS = {"w": W_NS, "r": R_NS}
 
-PAGINATION_TAGS = ("widowControl", "keepNext", "keepLines", "pageBreakBefore")
+PAGINATION_OOXML = {
+    "widow_control": "widowControl",
+    "keep_with_next": "keepNext",
+    "keep_together": "keepLines",
+    "page_break_before": "pageBreakBefore",
+}
 
 
 def load_rules(path: Path) -> dict:
@@ -163,8 +167,7 @@ def footer_signatures(pkg: Package, document: ET.Element) -> dict:
         if rid and target:
             targets[rid] = target
 
-    sections = document.findall(".//w:sectPr", NS)
-    sect = sections[-1]
+    sect = document.findall(".//w:sectPr", NS)[-1]
     result = {}
 
     for ref in sect.findall("w:footerReference", NS):
@@ -205,7 +208,7 @@ def footer_signatures(pkg: Package, document: ET.Element) -> dict:
     return result
 
 
-def template_errors(target: Package, template: Package, rules: dict) -> tuple[list[str], list[str]]:
+def template_errors(target: Package, template: Package, rules: dict):
     errors, warnings = [], []
 
     t_styles = target.xml("word/styles.xml")
@@ -276,6 +279,7 @@ def quick_rule_errors(pkg: Package, rules: dict) -> list[str]:
 
     remove_parts = set(rules["metadata"]["remove_parts"])
     rel_types = set(rules["metadata"]["relationship_types"])
+
     for part in sorted(remove_parts):
         if part in pkg.names:
             errors.append(f"META-PART: {part}")
@@ -315,12 +319,16 @@ def quick_rule_errors(pkg: Package, rules: dict) -> list[str]:
                 f"FMT-BODY-INDENT: expected {expected}, got {w_attr(ind, 'firstLine')!r}"
             )
 
+    disabled_tags = [
+        PAGINATION_OOXML[name] for name in rules["pagination"]["disable"]
+    ]
+
     for style in styles.findall("w:style", NS):
         if w_attr(style, "type") != "paragraph":
             continue
         name = w_attr(style.find("w:name", NS), "val") or w_attr(style, "styleId") or "?"
         ppr = style.find("w:pPr", NS)
-        for tag in PAGINATION_TAGS:
+        for tag in disabled_tags:
             node = ppr.find(f"w:{tag}", NS) if ppr is not None else None
             if not is_false(node):
                 errors.append(f"FMT-PAGINATION-STYLE: {name}.{tag}")
@@ -329,7 +337,7 @@ def quick_rule_errors(pkg: Package, rules: dict) -> list[str]:
         ppr = p.find("w:pPr", NS)
         if ppr is None:
             continue
-        for tag in PAGINATION_TAGS:
+        for tag in disabled_tags:
             node = ppr.find(f"w:{tag}", NS)
             if node is not None and not is_false(node):
                 errors.append(f"FMT-PAGINATION-PARA: paragraph {idx}.{tag}")
@@ -368,7 +376,7 @@ def quick_rule_errors(pkg: Package, rules: dict) -> list[str]:
                     )
 
     max_width = int(rules["table"]["max_width_twips"])
-    min_font = int(rules["table"]["font_half_points"])
+    min_font = int(rules["table"]["font_pt"] * 2)
 
     for t_idx, tbl in enumerate(document.findall(".//w:tbl", NS), 1):
         tblpr = tbl.find("w:tblPr", NS)
@@ -385,8 +393,9 @@ def quick_rule_errors(pkg: Package, rules: dict) -> list[str]:
             except ValueError:
                 errors.append(f"TBL-WIDTH: table {t_idx}")
 
-        if w_attr(layout, "type") != "fixed":
+        if w_attr(layout, "type") != rules["table"]["layout"]:
             errors.append(f"TBL-LAYOUT: table {t_idx}")
+
         if tblind is not None and w_attr(tblind, "w") not in {None, "0"}:
             errors.append(f"TBL-INDENT: table {t_idx}")
 
@@ -404,7 +413,7 @@ def quick_rule_errors(pkg: Package, rules: dict) -> list[str]:
         for c_idx, tc in enumerate(tbl.findall(".//w:tc", NS), 1):
             tcpr = tc.find("w:tcPr", NS)
             valign = tcpr.find("w:vAlign", NS) if tcpr is not None else None
-            if w_attr(valign, "val") != "center":
+            if w_attr(valign, "val") != rules["table"]["vertical_alignment"]:
                 errors.append(f"TBL-VERTICAL-ALIGN: table {t_idx} cell {c_idx}")
 
             for p_idx, p in enumerate(tc.findall("w:p", NS), 1):
@@ -412,28 +421,29 @@ def quick_rule_errors(pkg: Package, rules: dict) -> list[str]:
                 jc = ppr.find("w:jc", NS) if ppr is not None else None
                 ind = ppr.find("w:ind", NS) if ppr is not None else None
 
-                if w_attr(jc, "val") != "center":
+                if w_attr(jc, "val") != rules["table"]["horizontal_alignment"]:
                     errors.append(
                         f"TBL-HORIZONTAL-ALIGN: table {t_idx} cell {c_idx} paragraph {p_idx}"
                     )
 
-                required_zero = (
-                    "left", "right", "firstLine",
-                    "leftChars", "rightChars", "firstLineChars",
-                    "start", "end", "startChars", "endChars",
-                )
-                hanging = (
-                    w_attr(ind, "hanging") if ind is not None else None,
-                    w_attr(ind, "hangingChars") if ind is not None else None,
-                )
-                if (
-                    ind is None
-                    or any(w_attr(ind, key) != "0" for key in required_zero)
-                    or any(value not in {None, "0"} for value in hanging)
-                ):
-                    errors.append(
-                        f"TBL-PARA-INDENT: table {t_idx} cell {c_idx} paragraph {p_idx}"
+                if rules["table"]["zero_indentation"]:
+                    required_zero = (
+                        "left", "right", "firstLine",
+                        "leftChars", "rightChars", "firstLineChars",
+                        "start", "end", "startChars", "endChars",
                     )
+                    hanging = (
+                        w_attr(ind, "hanging") if ind is not None else None,
+                        w_attr(ind, "hangingChars") if ind is not None else None,
+                    )
+                    if (
+                        ind is None
+                        or any(w_attr(ind, key) != "0" for key in required_zero)
+                        or any(value not in {None, "0"} for value in hanging)
+                    ):
+                        errors.append(
+                            f"TBL-PARA-INDENT: table {t_idx} cell {c_idx} paragraph {p_idx}"
+                        )
 
                 for r_idx, run in enumerate(p.findall(".//w:r", NS), 1):
                     if not "".join((t.text or "") for t in run.findall(".//w:t", NS)):
