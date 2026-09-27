@@ -111,7 +111,7 @@ python scripts/validate_docx.py 文件.docx --report validation.json
 
 最多自动修复两轮。
 
-如果两轮之后仍然存在同一问题，应停止重复修复，进入诊断，而不是继续盲目循环。
+如果两轮之后仍然存在同一错误码，应停止重复修复，进入诊断，而不是继续盲目循环。此时优先判断是 formatter 未覆盖该情况，还是 validator 对不可见 OOXML 结构产生了误报。
 
 ---
 
