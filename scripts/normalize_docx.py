@@ -3,8 +3,8 @@
 
 This script deliberately uses python-docx/lxml so existing OOXML namespaces, mc:Ignorable
 prefixes, relationships, fields, drawings, bookmarks, and other unsupported elements remain
-on their original XML trees. It then performs package/XML/reopen checks before replacing
-an in-place document.
+on their original XML trees. It then strips embedded Word document-property metadata and performs package/XML/reopen
+checks before replacing an in-place document.
 """
 
 from __future__ import annotations
@@ -28,6 +28,17 @@ TABLE_STYLE = "表格正文"
 BODY_FIRST_LINE_PT = 32
 TABLE_FONT_PT = 14
 TWIP_EMU = 635
+
+METADATA_PARTS = {
+    "docProps/core.xml",
+    "docProps/app.xml",
+    "docProps/custom.xml",
+}
+METADATA_REL_TYPES = {
+    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties",
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties",
+}
 
 
 def set_pagination_off(fmt) -> None:
@@ -181,6 +192,65 @@ def normalize_table(table, table_style, max_width_twips: int) -> None:
                 normalize_table(nested, table_style, max_width_twips)
 
 
+
+def strip_package_metadata(path: Path) -> None:
+    """Remove embedded Word file-property metadata from the final DOCX package."""
+    fd, temp_name = tempfile.mkstemp(
+        prefix=path.stem + ".metadata-",
+        suffix=path.suffix,
+        dir=path.parent,
+    )
+    os.close(fd)
+    temp_path = Path(temp_name)
+
+    try:
+        with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(temp_path, "w") as zout:
+            for info in zin.infolist():
+                name = info.filename
+
+                if name in METADATA_PARTS:
+                    continue
+
+                data = zin.read(name)
+
+                if name == "_rels/.rels":
+                    root = etree.fromstring(data)
+                    for rel in list(root):
+                        rel_type = rel.get("Type", "")
+                        target = rel.get("Target", "").lstrip("/")
+                        if (
+                            rel_type in METADATA_REL_TYPES
+                            or target in METADATA_PARTS
+                        ):
+                            root.remove(rel)
+                    data = etree.tostring(
+                        root,
+                        xml_declaration=True,
+                        encoding="UTF-8",
+                        standalone=True,
+                    )
+
+                elif name == "[Content_Types].xml":
+                    root = etree.fromstring(data)
+                    for child in list(root):
+                        part_name = child.get("PartName", "").lstrip("/")
+                        if part_name in METADATA_PARTS:
+                            root.remove(child)
+                    data = etree.tostring(
+                        root,
+                        xml_declaration=True,
+                        encoding="UTF-8",
+                        standalone=True,
+                    )
+
+                zout.writestr(info, data)
+
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def verify_output(path: Path) -> None:
     """Fail before replacement if the generated package is structurally unreadable."""
     with zipfile.ZipFile(path, "r") as zf:
@@ -262,6 +332,7 @@ def normalize(src: Path, dst: Path) -> None:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     doc.save(dst)
+    strip_package_metadata(dst)
     verify_output(dst)
 
 
@@ -269,7 +340,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Safely normalize body indentation, pagination options, "
-            "and table formatting in DOCX."
+            "table formatting, and metadata sanitization in DOCX."
         )
     )
     parser.add_argument("document", type=Path)

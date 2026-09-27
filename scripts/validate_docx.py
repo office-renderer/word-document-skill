@@ -2,8 +2,7 @@
 """Validate a DOCX/DOTX against the bundled Word template's structural invariants.
 
 Uses only the Python standard library. It checks package/XML integrity, mc:Ignorable
-namespace references, style/page invariants, body indentation, pagination controls,
-and table formatting. It does not police arbitrary non-table run-level fonts because
+namespace references, metadata sanitization, style/page invariants, body indentation,\npagination controls, and table formatting. It does not police arbitrary non-table run-level fonts because
 direct formatting can be legitimate for equations, symbols, and imported content.
 """
 
@@ -29,6 +28,17 @@ NORMAL_STYLE_NAME = "Normal"
 BODY_FIRST_LINE_TWIPS = "640"
 TABLE_MAX_WIDTH = 8845
 TABLE_FONT_HALF_POINTS = 28
+
+METADATA_PARTS = {
+    "docProps/core.xml",
+    "docProps/app.xml",
+    "docProps/custom.xml",
+}
+METADATA_REL_TYPES = {
+    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties",
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties",
+}
 
 CORE_STYLE_NAMES = [
     "Normal",
@@ -315,6 +325,43 @@ def package_integrity_errors(path: Path) -> list[str]:
     return errors
 
 
+
+def metadata_rule_errors(path: Path) -> list[str]:
+    """Require final output packages to contain no embedded Word property metadata."""
+    errors: list[str] = []
+
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+
+        for part in sorted(METADATA_PARTS):
+            if part in names:
+                errors.append(f"metadata part must be removed: {part}")
+
+        if "_rels/.rels" in names:
+            root = ET.fromstring(zf.read("_rels/.rels"))
+            for rel in root:
+                rel_type = rel.get("Type", "")
+                target = rel.get("Target", "").lstrip("/")
+                if (
+                    rel_type in METADATA_REL_TYPES
+                    or target in METADATA_PARTS
+                ):
+                    errors.append(
+                        f"metadata relationship remains: {rel_type} -> {target}"
+                    )
+
+        if "[Content_Types].xml" in names:
+            root = ET.fromstring(zf.read("[Content_Types].xml"))
+            for child in root:
+                part_name = child.get("PartName", "").lstrip("/")
+                if part_name in METADATA_PARTS:
+                    errors.append(
+                        f"metadata content-type override remains: {part_name}"
+                    )
+
+    return errors
+
+
 def table_rule_errors(document_root: ET.Element) -> list[str]:
     errors: list[str] = []
     for t_idx, tbl in enumerate(document_root.findall(".//w:tbl", NS), 1):
@@ -401,6 +448,7 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
 
 def persistent_rule_errors(path: Path) -> list[str]:
     errors: list[str] = package_integrity_errors(path)
+    errors.extend(metadata_rule_errors(path))
     with zipfile.ZipFile(path) as zf:
         styles = read_xml(zf, "word/styles.xml")
         document = read_xml(zf, "word/document.xml")
