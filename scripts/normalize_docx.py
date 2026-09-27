@@ -94,6 +94,7 @@ TBLPR_ORDER = {
     "jc": 7, "tblCellSpacing": 8, "tblInd": 9, "tblBorders": 10,
     "shd": 11, "tblLayout": 12, "tblCellMar": 13, "tblLook": 14,
 }
+MARGIN_ORDER = {"top": 0, "start": 1, "left": 1, "bottom": 2, "end": 3, "right": 3}
 TCPR_ORDER = {
     "cnfStyle": 0, "tcW": 1, "gridSpan": 2, "hMerge": 3, "vMerge": 4,
     "tcBorders": 5, "shd": 6, "noWrap": 7, "tcMar": 8,
@@ -139,6 +140,22 @@ def set_run_size(run, half_points):
     ensure_ordered(rpr, "szCs", RPR_ORDER).set(W + "val", half_points)
 
 
+def set_margin_zero(margins, tag):
+    node = margins.find(f"w:{tag}", NS)
+    if node is None:
+        node = ET.Element(W + tag)
+        target = MARGIN_ORDER.get(tag, 99)
+        pos = len(margins)
+        for i, child in enumerate(list(margins)):
+            name = child.tag.rsplit("}", 1)[-1]
+            if MARGIN_ORDER.get(name, 99) > target:
+                pos = i
+                break
+        margins.insert(pos, node)
+    node.set(W + "w", "0")
+    node.set(W + "type", "dxa")
+
+
 def normalize_tables(doc):
     for tbl in doc.findall(".//w:tbl", NS):
         tblpr = tbl.find("w:tblPr", NS)
@@ -152,6 +169,10 @@ def normalize_tables(doc):
 
         layout = ensure_ordered(tblpr, "tblLayout", TBLPR_ORDER)
         layout.set(W + "type", "fixed")
+
+        tbl_cell_mar = ensure_ordered(tblpr, "tblCellMar", TBLPR_ORDER)
+        set_margin_zero(tbl_cell_mar, "left")
+        set_margin_zero(tbl_cell_mar, "right")
 
         grid = tbl.find("w:tblGrid", NS)
         widths = []
@@ -194,6 +215,10 @@ def normalize_tables(doc):
             tcw.set(W + "w", "0")
             tcw.set(W + "type", "auto")
 
+            tc_mar = ensure_ordered(tcpr, "tcMar", TCPR_ORDER)
+            set_margin_zero(tc_mar, "left")
+            set_margin_zero(tc_mar, "right")
+
             valign = ensure_ordered(tcpr, "vAlign", TCPR_ORDER)
             valign.set(W + "val", "center")
 
@@ -204,11 +229,12 @@ def normalize_tables(doc):
                     p.insert(0, ppr)
 
                 ind = ensure_ordered(ppr, "ind", PPR_ORDER)
-                for key in ("leftChars", "rightChars", "firstLineChars", "hangingChars", "hanging"):
-                    ind.attrib.pop(W + key, None)
-                ind.set(W + "left", "0")
-                ind.set(W + "right", "0")
-                ind.set(W + "firstLine", "0")
+                for key in (
+                    "left", "right", "firstLine", "hanging",
+                    "leftChars", "rightChars", "firstLineChars", "hangingChars",
+                    "start", "end", "startChars", "endChars",
+                ):
+                    ind.set(W + key, "0")
 
                 jc = ensure_ordered(ppr, "jc", PPR_ORDER)
                 jc.set(W + "val", "center")
