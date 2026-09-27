@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Validate a DOCX/DOTX against the bundled Word template's structural invariants.
 
-Uses only the Python standard library. It intentionally focuses on package/style/page
-structure and does not police every run-level font because direct formatting can be
-legitimate for equations, symbols, imported content, and other special cases.
+Uses only the Python standard library. It checks package/XML integrity, mc:Ignorable
+namespace references, style/page invariants, body indentation, pagination controls,
+and table formatting. It does not police arbitrary non-table run-level fonts because
+direct formatting can be legitimate for equations, symbols, and imported content.
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 import zipfile
@@ -16,7 +18,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"\nMC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 NS = {"w": W_NS, "r": R_NS}
 W = "{" + W_NS + "}"
 R = "{" + R_NS + "}"
@@ -61,6 +63,8 @@ def read_xml(zf: zipfile.ZipFile, member: str) -> ET.Element:
         return ET.fromstring(zf.read(member))
     except KeyError as exc:
         raise ValueError(f"missing OOXML part: {member}") from exc
+    except ET.ParseError as exc:
+        raise ValueError(f"invalid XML in OOXML part {member}: {exc}") from exc
 
 
 def element_attrs(el: ET.Element | None, names: tuple[str, ...]) -> dict[str, str | None]:
@@ -272,6 +276,45 @@ def _paragraph_text(p: ET.Element) -> str:
 
 
 
+def package_integrity_errors(path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        with zipfile.ZipFile(path) as zf:
+            bad_member = zf.testzip()
+            if bad_member:
+                errors.append(f"ZIP corruption: {bad_member}")
+
+            for member in zf.namelist():
+                if not member.endswith((".xml", ".rels")):
+                    continue
+                data = zf.read(member)
+                try:
+                    root = ET.fromstring(data)
+                except ET.ParseError as exc:
+                    errors.append(f"{member}: invalid XML: {exc}")
+                    continue
+
+                ignorable = root.get("{" + MC_NS + "}Ignorable")
+                if ignorable:
+                    declared = set()
+                    try:
+                        for _event, ns in ET.iterparse(
+                            io.BytesIO(data), events=("start-ns",)
+                        ):
+                            prefix, _uri = ns
+                            declared.add(prefix or "")
+                    except ET.ParseError:
+                        continue
+                    for prefix in ignorable.split():
+                        if prefix not in declared:
+                            errors.append(
+                                f"{member}: mc:Ignorable references undeclared prefix {prefix!r}"
+                            )
+    except zipfile.BadZipFile as exc:
+        errors.append(f"invalid DOCX ZIP package: {exc}")
+    return errors
+
+
 def table_rule_errors(document_root: ET.Element) -> list[str]:
     errors: list[str] = []
     for t_idx, tbl in enumerate(document_root.findall(".//w:tbl", NS), 1):
@@ -288,16 +331,11 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
             errors.append(f"table {t_idx}: preferred width type must be dxa")
         elif preferred > TABLE_MAX_WIDTH:
             errors.append(f"table {t_idx}: preferred width {preferred} exceeds {TABLE_MAX_WIDTH} twips")
-        if w_attr(tblind, "w") != "0":
-            errors.append(f"table {t_idx}: table indent must be explicitly 0, got {w_attr(tblind, 'w')!r}")
+        if tblind is not None and w_attr(tblind, "w") != "0":
+            errors.append(f"table {t_idx}: table indent must be 0 when present, got {w_attr(tblind, 'w')!r}")
         if w_attr(layout, "type") != "fixed":
             errors.append(f"table {t_idx}: tblLayout must be fixed")
 
-        tbl_cell_mar = tblpr.find("w:tblCellMar", NS) if tblpr is not None else None
-        for side in ("left", "right"):
-            node = tbl_cell_mar.find(f"w:{side}", NS) if tbl_cell_mar is not None else None
-            if w_attr(node, "w") != "0":
-                errors.append(f"table {t_idx}: {side} cell margin must be explicitly 0")
 
         grid = tbl.find("w:tblGrid", NS)
         if grid is not None:
@@ -316,11 +354,6 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
             tcw = tcpr.find("w:tcW", NS) if tcpr is not None else None
             if w_attr(tcw, "type") != "auto":
                 errors.append(f"table {t_idx} cell {c_idx}: preferred cell width must be auto")
-            tc_mar = tcpr.find("w:tcMar", NS) if tcpr is not None else None
-            for side in ("left", "right"):
-                node = tc_mar.find(f"w:{side}", NS) if tc_mar is not None else None
-                if w_attr(node, "w") != "0":
-                    errors.append(f"table {t_idx} cell {c_idx}: {side} cell margin must be explicitly 0")
             if w_attr(valign, "val") != "center":
                 errors.append(f"table {t_idx} cell {c_idx}: vertical alignment must be center")
 
@@ -330,14 +363,22 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
                 ind = ppr.find("w:ind", NS) if ppr is not None else None
                 if w_attr(jc, "val") != "center":
                     errors.append(f"table {t_idx} cell {c_idx} paragraph {p_idx}: alignment must be center")
-                indent_keys = (
-                    "left", "right", "firstLine", "hanging",
-                    "leftChars", "rightChars", "firstLineChars", "hangingChars",
+                required_zero = (
+                    "left", "right", "firstLine",
+                    "leftChars", "rightChars", "firstLineChars",
                     "start", "end", "startChars", "endChars",
                 )
-                if ind is None or any(w_attr(ind, key) != "0" for key in indent_keys):
+                hanging_values = (
+                    w_attr(ind, "hanging") if ind is not None else None,
+                    w_attr(ind, "hangingChars") if ind is not None else None,
+                )
+                if (
+                    ind is None
+                    or any(w_attr(ind, key) != "0" for key in required_zero)
+                    or any(value not in {None, "0"} for value in hanging_values)
+                ):
                     errors.append(
-                        f"table {t_idx} cell {c_idx} paragraph {p_idx}: all indentation attributes must be explicitly zero"
+                        f"table {t_idx} cell {c_idx} paragraph {p_idx}: table indentation is not fully neutralized"
                     )
 
                 for r_idx, run in enumerate(p.findall("w:r", NS), 1):
@@ -359,7 +400,7 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
 
 
 def persistent_rule_errors(path: Path) -> list[str]:
-    errors: list[str] = []
+    errors: list[str] = package_integrity_errors(path)
     with zipfile.ZipFile(path) as zf:
         styles = read_xml(zf, "word/styles.xml")
         document = read_xml(zf, "word/document.xml")
