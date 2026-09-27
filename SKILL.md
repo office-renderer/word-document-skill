@@ -23,7 +23,7 @@ This skill has one closed loop. Do not manually remember or replay formatting ru
    python scripts/format_docx.py output.docx --fix validation.json --in-place
    python scripts/validate_docx.py output.docx --report validation.json
    ```
-5. Allow at most two automatic repair cycles. If it still fails, stop and report the remaining validator codes. Do not invent another formatting procedure.
+5. Allow at most two automatic repair cycles. If the same validator code remains after two cycles, treat it as a diagnostic issue rather than repeating the same repair. Stop, report the remaining code and its context, and update the formatter/validator rule only after the cause is understood.
 6. Use `--strict` only for final structural QA or troubleshooting.
 7. DOCX→PDF rendering is separate. Render only when the user explicitly requests a format/PDF check or the task has explicitly entered final visual QA.
 
@@ -32,7 +32,7 @@ This skill has one closed loop. Do not manually remember or replay formatting ru
 - `assets/公文排版Word模板.dotx`: template-defined formatting.
 - `config/rules.json`: machine formatting rules shared by formatter and validator.
 - `scripts/format_docx.py`: the only normal entry point for applying and repairing Word formatting.
-- `scripts/validate_docx.py`: read-only validation; it never modifies the document.
+- `scripts/validate_docx.py`: read-only validation; it never modifies the document. Validation follows rendered/semantic behavior rather than requiring irrelevant hidden OOXML nodes to match.
 - `references/template-spec.md`: diagnostic reference only; do not read it during normal execution.
 
 ## Scope boundary
