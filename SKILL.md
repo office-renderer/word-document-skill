@@ -20,8 +20,9 @@ Treat `assets/公文排版Word模板.dotx` as the authoritative formatting sourc
 9. The body first-line indent MUST come from `正文（默认）`, whose template value is `640` twips (about two Chinese characters at 16 pt). Do not add a direct first-line/hanging-indent override to body paragraphs.
 10. Disable all Word paragraph pagination controls everywhere: widow/orphan control, keep with next, keep lines together, and page break before. This persistent rule overrides inherited/template pagination values.
 11. Tables must stay inside the body text area. Their total width must not exceed `8845` twips (about 15.6 cm, the template's usable width between left/right margins).
-12. All table-cell paragraphs must have zero left/right/first-line/hanging indentation and must be horizontally centered; cells must be vertically centered.
-13. Table text defaults to 14 pt (四号). Do not shrink table text below 14 pt merely to make a table fit; wrap cell text and reduce column widths instead.
+12. All table-cell paragraphs must explicitly set every twip-based and character-based indentation value to zero (`left/right/firstLine/hanging`, `leftChars/rightChars/firstLineChars/hangingChars`, and start/end equivalents), so no indentation can be inherited from `Normal`, `正文（默认）`, or another style. Paragraphs are horizontally centered; cells are vertically centered.
+13. Table left/right cell margins are explicitly zero at both table and cell level; there must be no hidden side padding that looks like paragraph indentation.
+14. Table text defaults to 14 pt (四号). Do not shrink table text below 14 pt merely to make a table fit; wrap cell text and reduce column widths instead.
 
 ## Mandatory normalization
 
