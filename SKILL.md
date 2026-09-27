@@ -19,6 +19,9 @@ Treat `assets/公文排版Word模板.dotx` as the authoritative formatting sourc
 8. Ordinary body prose MUST use the template paragraph style `正文（默认）`. Do not leave normal body paragraphs on `Normal` or an unstyled paragraph.
 9. The body first-line indent MUST come from `正文（默认）`, whose template value is `640` twips (about two Chinese characters at 16 pt). Do not add a direct first-line/hanging-indent override to body paragraphs.
 10. Disable all Word paragraph pagination controls everywhere: widow/orphan control, keep with next, keep lines together, and page break before. This persistent rule overrides inherited/template pagination values.
+11. Tables must stay inside the body text area. Their total width must not exceed `8845` twips (about 15.6 cm, the template's usable width between left/right margins).
+12. All table-cell paragraphs must have zero left/right/first-line/hanging indentation and must be horizontally centered; cells must be vertically centered.
+13. Table text defaults to 14 pt (四号). Do not shrink table text below 14 pt merely to make a table fit; wrap cell text and reduce column widths instead.
 
 ## Mandatory normalization
 
@@ -36,6 +39,8 @@ This normalization step:
 - removes direct first-line/hanging indentation from those body paragraphs so the template controls the two-character first-line indent;
 - explicitly disables widow/orphan control, keep with next, keep lines together, and page break before on all paragraph styles;
 - turns off any direct paragraph pagination override that would re-enable those options.
+
+For tables, normalization additionally constrains the table to the usable page width, centers cell contents, removes all cell-paragraph indentation, vertically centers cells, and sets table text to 14 pt while preserving bold/italic emphasis.
 
 Run normalization before structural validation.
 
