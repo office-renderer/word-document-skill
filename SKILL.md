@@ -1,11 +1,11 @@
 ---
 name: word-document-skill
-description: Create, edit, and validate Microsoft Word documents that must follow the bundled AI生成文档使用模板.dotx. Use when a .docx/.dotx task explicitly asks to use this template, says “按模板/按AI生成文档使用模板/按公文样式”, or belongs to a workflow that has designated this template as the Word formatting standard. Preserve the template's page setup, heading hierarchy, paragraph styles, TOC behavior, fonts, spacing, and odd/even page numbering unless the user explicitly overrides a specific item. Do not use for unrelated Word documents with a different requested style.
+description: Create, edit, and validate Microsoft Word documents that must follow the bundled 公文排版Word模板.dotx. Use when a .docx/.dotx task explicitly asks to use this template, says “按模板/按公文排版Word模板/按公文样式”, or belongs to a workflow that has designated this template as the Word formatting standard. Preserve the template's page setup, heading hierarchy, paragraph styles, TOC behavior, fonts, spacing, and odd/even page numbering unless the user explicitly overrides a specific item. Do not use for unrelated Word documents with a different requested style.
 ---
 
 # Word Document Skill
 
-Treat `assets/AI生成文档使用模板.dotx` as the authoritative formatting source. Treat `references/template-spec.md` as an explanatory and validation reference, not as a replacement for the template file.
+Treat `assets/公文排版Word模板.dotx` as the authoritative formatting source. Treat `references/template-spec.md` as an explanatory and validation reference, not as a replacement for the template file.
 
 ## Core rules
 
@@ -33,7 +33,7 @@ Read `references/template-spec.md` when exact font, size, spacing, margin, foote
 
 ## New document workflow
 
-1. Start from `assets/AI生成文档使用模板.dotx` so the package keeps the original styles, settings, and odd/even footers.
+1. Start from `assets/公文排版Word模板.dotx` so the package keeps the original styles, settings, and odd/even footers.
 2. Replace the template's demonstration text with the requested content; do not leave sample paragraphs in the final deliverable.
 3. If the chosen library cannot directly instantiate `.dotx`, create a working OOXML copy and convert the package's main content type from Word template to Word document before editing. Do not rebuild the document styles from scratch merely to work around `.dotx` handling.
 4. Map paragraphs to the template styles instead of applying equivalent direct formatting where a matching style already exists.

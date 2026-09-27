@@ -260,7 +260,7 @@ def main() -> int:
     parser.add_argument(
         "--template",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "assets" / "AI生成文档使用模板.dotx",
+        default=Path(__file__).resolve().parents[1] / "assets" / "公文排版Word模板.dotx",
         help="reference template (defaults to the bundled asset)",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
