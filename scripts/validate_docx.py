@@ -284,10 +284,12 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
             preferred = int(w_attr(tblw, "w") or "0")
         except ValueError:
             preferred = 0
-        if w_attr(tblw, "type") == "dxa" and preferred > TABLE_MAX_WIDTH:
+        if w_attr(tblw, "type") != "dxa":
+            errors.append(f"table {t_idx}: preferred width type must be dxa")
+        elif preferred > TABLE_MAX_WIDTH:
             errors.append(f"table {t_idx}: preferred width {preferred} exceeds {TABLE_MAX_WIDTH} twips")
-        if w_attr(tblind, "w") not in {None, "0"}:
-            errors.append(f"table {t_idx}: table indent must be 0, got {w_attr(tblind, 'w')!r}")
+        if w_attr(tblind, "w") != "0":
+            errors.append(f"table {t_idx}: table indent must be explicitly 0, got {w_attr(tblind, 'w')!r}")
         if w_attr(layout, "type") != "fixed":
             errors.append(f"table {t_idx}: tblLayout must be fixed")
 
@@ -305,6 +307,9 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
         for c_idx, tc in enumerate(tbl.findall(".//w:tc", NS), 1):
             tcpr = tc.find("w:tcPr", NS)
             valign = tcpr.find("w:vAlign", NS) if tcpr is not None else None
+            tcw = tcpr.find("w:tcW", NS) if tcpr is not None else None
+            if w_attr(tcw, "type") != "auto":
+                errors.append(f"table {t_idx} cell {c_idx}: preferred cell width must be auto")
             if w_attr(valign, "val") != "center":
                 errors.append(f"table {t_idx} cell {c_idx}: vertical alignment must be center")
 
