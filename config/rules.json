@@ -39,28 +39,6 @@
     ]
   },
   "validation": {
-    "template_compare_styles": [
-      "Normal",
-      "正文（默认）",
-      "公文标题",
-      "一级标题",
-      "二级标题",
-      "三级标题",
-      "四级标题",
-      "heading 1",
-      "heading 2",
-      "heading 3",
-      "heading 4",
-      "heading 5",
-      "TOC Heading",
-      "目录标题",
-      "TOC 11",
-      "目录一级条目",
-      "TOC 21",
-      "目录二级条目",
-      "TOC 31",
-      "目录三级条目"
-    ],
     "quick_required_parts": [
       "[Content_Types].xml",
       "_rels/.rels",
