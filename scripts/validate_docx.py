@@ -2,7 +2,8 @@
 """Validate a DOCX/DOTX against the bundled Word template's structural invariants.
 
 Uses only the Python standard library. It checks package/XML integrity, mc:Ignorable
-namespace references, metadata sanitization, style/page invariants, body indentation,\npagination controls, and table formatting. It does not police arbitrary non-table run-level fonts because
+namespace references, metadata sanitization, style/page invariants, body indentation,
+pagination controls, and table formatting. It does not police arbitrary non-table run-level fonts because
 direct formatting can be legitimate for equations, symbols, and imported content.
 """
 
@@ -17,7 +18,8 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"\nMC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 NS = {"w": W_NS, "r": R_NS}
 W = "{" + W_NS + "}"
 R = "{" + R_NS + "}"
