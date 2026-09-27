@@ -190,6 +190,10 @@ def normalize_tables(doc):
             if tcpr is None:
                 tcpr = ET.Element(W + "tcPr")
                 tc.insert(0, tcpr)
+            tcw = ensure_ordered(tcpr, "tcW", TCPR_ORDER)
+            tcw.set(W + "w", "0")
+            tcw.set(W + "type", "auto")
+
             valign = ensure_ordered(tcpr, "vAlign", TCPR_ORDER)
             valign.set(W + "val", "center")
 
