@@ -153,11 +153,26 @@ def usable_width_twips(doc, configured_max: int) -> int:
     return min([configured_max, *widths]) if widths else configured_max
 
 
-def ensure_tbl_child(tbl_pr, tag: str):
-    node = tbl_pr.find(qn(tag))
-    if node is None:
-        node = OxmlElement(tag)
-        tbl_pr.append(node)
+TBLW_LATER_TAGS = tuple(
+    qn(tag) for tag in (
+        "w:jc", "w:tblCellSpacing", "w:tblInd", "w:tblBorders", "w:shd",
+        "w:tblLayout", "w:tblCellMar", "w:tblLook", "w:tblCaption",
+        "w:tblDescription", "w:tblPrChange",
+    )
+)
+
+
+def ensure_tbl_width(tbl_pr):
+    node = tbl_pr.find(qn("w:tblW"))
+    if node is not None:
+        return node
+    node = OxmlElement("w:tblW")
+    insert_at = len(tbl_pr)
+    for index, child in enumerate(tbl_pr):
+        if child.tag in TBLW_LATER_TAGS:
+            insert_at = index
+            break
+    tbl_pr.insert(insert_at, node)
     return node
 
 
@@ -165,7 +180,7 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
     table.autofit = rules["table"]["layout"] != "fixed"
 
     tbl_pr = table._tbl.tblPr
-    tbl_w = ensure_tbl_child(tbl_pr, "w:tblW")
+    tbl_w = ensure_tbl_width(tbl_pr)
     tbl_w.set(qn("w:type"), "dxa")
     tbl_w.set(qn("w:w"), str(max_width))
 
@@ -174,7 +189,7 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
         tbl_ind.set(qn("w:type"), "dxa")
         tbl_ind.set(qn("w:w"), "0")
 
-    layout = ensure_tbl_child(tbl_pr, "w:tblLayout")
+    layout = tbl_pr.get_or_add_tblLayout()
     layout.set(qn("w:type"), rules["table"]["layout"])
 
     grid_cols = list(table._tbl.tblGrid.gridCol_lst)
