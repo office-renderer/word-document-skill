@@ -21,7 +21,7 @@ Treat `assets/公文排版Word模板.dotx` as the authoritative formatting sourc
 10. Disable all Word paragraph pagination controls everywhere: widow/orphan control, keep with next, keep lines together, and page break before. This persistent rule overrides inherited/template pagination values.
 11. Tables must stay inside the body text area. Their total width must not exceed `8845` twips (about 15.6 cm, the template's usable width between left/right margins).
 12. All table-cell paragraphs must explicitly set every twip-based and character-based indentation value to zero (`left/right/firstLine/hanging`, `leftChars/rightChars/firstLineChars/hangingChars`, and start/end equivalents), so no indentation can be inherited from `Normal`, `正文（默认）`, or another style. Paragraphs are horizontally centered; cells are vertically centered.
-13. Table left/right cell margins are explicitly zero at both table and cell level; there must be no hidden side padding that looks like paragraph indentation.
+13. Do not treat normal Word cell padding as paragraph indentation. Leave cell padding intact unless the user explicitly asks to change it; neutralize paragraph/style indentation instead.
 14. Table text defaults to 14 pt (四号). Do not shrink table text below 14 pt merely to make a table fit; wrap cell text and reduce column widths instead.
 
 ## Mandatory normalization
@@ -34,6 +34,8 @@ After creating a new document or substantially reformatting an existing one, run
 python scripts/normalize_docx.py /path/to/output.docx --in-place
 ```
 
+This normalization step uses `python-docx` and `lxml` on the existing Word XML tree; it must not parse and fully reserialize `document.xml` or `styles.xml` with `xml.etree.ElementTree`, because doing so can invalidate namespace-prefix declarations referenced by `mc:Ignorable` or disturb schema-sensitive element ordering.
+
 This normalization step:
 
 - maps ordinary long body prose that is `Normal`/unstyled onto `正文（默认）`;
@@ -41,7 +43,9 @@ This normalization step:
 - explicitly disables widow/orphan control, keep with next, keep lines together, and page break before on all paragraph styles;
 - turns off any direct paragraph pagination override that would re-enable those options.
 
-For tables, normalization additionally constrains the table to the usable page width, centers cell contents, removes all cell-paragraph indentation, vertically centers cells, and sets table text to 14 pt while preserving bold/italic emphasis.
+For tables, normalization additionally constrains the table to the usable page width, centers cell contents, removes all paragraph/style indentation inside cells, vertically centers cells, and sets table text to 14 pt while preserving bold/italic emphasis. Normal Word cell padding is not removed.
+
+After saving, the normalizer must verify ZIP integrity, parse every XML/relationships part, and reopen the result with `python-docx` before replacing an in-place file. If any check fails, keep the original file unchanged.
 
 Run normalization before structural validation.
 
