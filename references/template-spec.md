@@ -13,7 +13,6 @@
 - Word 左侧的小黑方块属于段落“换行和分页”属性提示，不是项目符号；按本 Skill 生成的最终文档不应出现该标记。
 - 表格总宽不得超过正文版心宽 `8845` twips（约 15.6 cm）；禁止越过左右页边距。
 - 表格单元格内段落的 twips 缩进和字符缩进必须全部在段落级显式写为 0，不能仅删除直接格式后依赖样式继承；统一水平居中，单元格统一垂直居中。
-- 表格及单元格的左右内边距显式设为 0，避免出现看起来像“左缩进”的空白。
 - 表格文字默认四号，即 14 pt（`w:sz=28` / `w:szCs=28`）。不得为了压缩表格宽度自动缩小字号；应优先缩列宽并允许单元格文字换行。
 
 生成或大幅重新排版 Word 后，应先运行 `scripts/normalize_docx.py`，再运行 `scripts/validate_docx.py`。
@@ -147,6 +146,14 @@
 - 默认采用固定表格布局，避免 Word 因长文本重新撑宽列宽。
 - 单元格垂直对齐：居中。
 - 单元格内所有段落：水平居中。
-- 单元格段落缩进：`left/right/firstLine/hanging`、`leftChars/rightChars/firstLineChars/hangingChars` 以及 start/end 等价属性全部显式为 0；不得继承正文或 Normal 的任何缩进。
-- 表格级和单元格级左右内边距：0。
+- 单元格段落缩进：`left/right/firstLine`、`leftChars/rightChars/firstLineChars` 以及 start/end 等价属性显式为 0；`hanging/hangingChars` 不得为非零值。不得继承正文或 Normal 的任何缩进。
 - 单元格文字：14 pt（四号）。保持原有加粗、斜体等强调属性，但不允许低于 14 pt。
+
+
+## 9. OOXML 安全要求
+
+- 不允许使用 `xml.etree.ElementTree` 将整个 `document.xml` 或 `styles.xml` 解析后重新序列化再写回 DOCX。
+- 原因：Word 文档可能通过 `mc:Ignorable` 引用仅存在于根节点命名空间声明中的前缀；普通 ElementTree 重写时可能丢失这些声明，同时段落/表格属性节点的顺序也可能偏离 WordprocessingML 预期，从而触发 Word 的“发现无法读取的内容”修复提示。
+- 格式规范化使用 `python-docx + lxml` 在现有 OOXML 树上局部修改。
+- 保存后必须执行三层检查：ZIP `testzip()`、全部 XML / RELS 可解析、用 `python-docx` 二次打开。
+- 原位修改只有在上述检查全部通过后才替换原文件。
