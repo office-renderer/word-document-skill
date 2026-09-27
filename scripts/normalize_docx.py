@@ -1,348 +1,297 @@
 #!/usr/bin/env python3
-"""Normalize body indentation and Word paragraph pagination options."""
+"""Safely normalize Word body/table formatting without reserializing OOXML with ElementTree.
+
+This script deliberately uses python-docx/lxml so existing OOXML namespaces, mc:Ignorable
+prefixes, relationships, fields, drawings, bookmarks, and other unsupported elements remain
+on their original XML trees. It then performs package/XML/reopen checks before replacing
+an in-place document.
+"""
 
 from __future__ import annotations
 
 import argparse
-import shutil
+import os
 import tempfile
 import zipfile
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
-W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-W = "{" + W_NS + "}"
-NS = {"w": W_NS}
-ET.register_namespace("w", W_NS)
+from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.shared import Pt
+from lxml import etree
 
-PAGINATION = ("widowControl", "keepNext", "keepLines", "pageBreakBefore")
 BODY_STYLE = "正文（默认）"
-NORMAL_STYLE = "Normal"
-BODY_FIRST_LINE = "640"
-TABLE_MAX_WIDTH = 8845
-TABLE_FONT_HALF_POINTS = "28"
+TABLE_STYLE = "表格正文"
+BODY_FIRST_LINE_PT = 32
+TABLE_FONT_PT = 14
+TWIP_EMU = 635
 
 
-def wa(el, name):
-    return None if el is None else el.get(W + name)
+def set_pagination_off(fmt) -> None:
+    """Uncheck all four Word line/page-break paragraph options."""
+    fmt.keep_with_next = False
+    fmt.keep_together = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
 
 
-def false_flag(ppr, tag):
-    node = ppr.find(f"w:{tag}", NS)
-    if node is None:
-        node = ET.Element(W + tag)
-        order = {
-            "pStyle": 0,
-            "keepNext": 1,
-            "keepLines": 2,
-            "pageBreakBefore": 3,
-            "framePr": 4,
-            "widowControl": 5,
-            "numPr": 6,
-            "spacing": 20,
-            "ind": 21,
-            "jc": 25,
-            "outlineLvl": 29,
-        }
-        target = order[tag]
-        pos = len(ppr)
-        for i, child in enumerate(list(ppr)):
-            child_name = child.tag.rsplit("}", 1)[-1]
-            if order.get(child_name, 99) > target:
-                pos = i
-                break
-        ppr.insert(pos, node)
-    node.set(W + "val", "0")
+def set_indentation_zero(paragraph_or_style) -> None:
+    """Explicitly block both twip- and character-based indent inheritance."""
+    fmt = paragraph_or_style.paragraph_format
+    fmt.left_indent = Pt(0)
+    fmt.right_indent = Pt(0)
+    fmt.first_line_indent = Pt(0)
+
+    if hasattr(paragraph_or_style, "_p"):
+        ppr = paragraph_or_style._p.get_or_add_pPr()
+    else:
+        ppr = paragraph_or_style._element.get_or_add_pPr()
+
+    ind = ppr.get_or_add_ind()
+    for name in (
+        "left", "right", "firstLine",
+        "leftChars", "rightChars", "firstLineChars",
+        "start", "end", "startChars", "endChars",
+    ):
+        ind.set(qn(f"w:{name}"), "0")
+
+    # firstLine and hanging are mutually exclusive; remove hanging rather than writing both.
+    for name in ("hanging", "hangingChars"):
+        ind.attrib.pop(qn(f"w:{name}"), None)
 
 
-def ensure_ppr(parent):
-    ppr = parent.find("w:pPr", NS)
-    if ppr is None:
-        ppr = ET.Element(W + "pPr")
-        rpr = parent.find("w:rPr", NS)
-        if rpr is not None:
-            parent.insert(list(parent).index(rpr), ppr)
-        else:
-            parent.append(ppr)
-    return ppr
+def iter_table_paragraphs(table):
+    for row in table.rows:
+        for cell in row.cells:
+            yield from cell.paragraphs
+            for nested in cell.tables:
+                yield from iter_table_paragraphs(nested)
 
 
-def maps(styles):
-    by_id, by_name = {}, {}
-    for s in styles.findall("w:style", NS):
-        sid, name = wa(s, "styleId"), wa(s.find("w:name", NS), "val")
-        if sid:
-            by_id[sid] = s
-        if name:
-            by_name[name] = s
-    return by_id, by_name
+def iter_all_paragraphs(doc):
+    yield from doc.paragraphs
+
+    for table in doc.tables:
+        yield from iter_table_paragraphs(table)
+
+    for section in doc.sections:
+        parts = (
+            section.header,
+            section.footer,
+            section.first_page_header,
+            section.first_page_footer,
+            section.even_page_header,
+            section.even_page_footer,
+        )
+        for part in parts:
+            yield from part.paragraphs
+            for table in part.tables:
+                yield from iter_table_paragraphs(table)
 
 
-def text_of(p):
-    return "".join((t.text or "") for t in p.findall(".//w:t", NS)).strip()
+def usable_width_twips(doc) -> int:
+    widths = []
+    for section in doc.sections:
+        if (
+            section.page_width is None
+            or section.left_margin is None
+            or section.right_margin is None
+        ):
+            continue
+        usable = int(
+            (section.page_width - section.left_margin - section.right_margin)
+            / TWIP_EMU
+        )
+        if usable > 0:
+            widths.append(usable)
+    return min(widths) if widths else 8845
 
 
+def normalize_table(table, table_style, max_width_twips: int) -> None:
+    """Constrain width and normalize cell paragraph formatting."""
+    table.autofit = False
 
-PPR_ORDER = {
-    "pStyle": 0, "keepNext": 1, "keepLines": 2, "pageBreakBefore": 3,
-    "framePr": 4, "widowControl": 5, "numPr": 6, "spacing": 20,
-    "ind": 21, "jc": 25, "rPr": 27, "outlineLvl": 29,
-}
-TBLPR_ORDER = {
-    "tblStyle": 0, "tblpPr": 1, "tblOverlap": 2, "bidiVisual": 3,
-    "tblStyleRowBandSize": 4, "tblStyleColBandSize": 5, "tblW": 6,
-    "jc": 7, "tblCellSpacing": 8, "tblInd": 9, "tblBorders": 10,
-    "shd": 11, "tblLayout": 12, "tblCellMar": 13, "tblLook": 14,
-}
-MARGIN_ORDER = {"top": 0, "start": 1, "left": 1, "bottom": 2, "end": 3, "right": 3}
-TCPR_ORDER = {
-    "cnfStyle": 0, "tcW": 1, "gridSpan": 2, "hMerge": 3, "vMerge": 4,
-    "tcBorders": 5, "shd": 6, "noWrap": 7, "tcMar": 8,
-    "textDirection": 9, "tcFitText": 10, "vAlign": 11, "hideMark": 12,
-}
-RPR_ORDER = {
-    "rStyle": 0, "rFonts": 1, "b": 2, "bCs": 3, "i": 4, "iCs": 5,
-    "caps": 6, "smallCaps": 7, "strike": 8, "dstrike": 9,
-    "outline": 10, "shadow": 11, "emboss": 12, "imprint": 13,
-    "noProof": 14, "snapToGrid": 15, "vanish": 16, "webHidden": 17,
-    "color": 18, "spacing": 19, "w": 20, "kern": 21, "position": 22,
-    "sz": 23, "szCs": 24, "highlight": 25, "u": 26,
-}
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.first_child_found_in("w:tblW")
+    if tbl_w is not None:
+        tbl_w.set(qn("w:type"), "dxa")
+        tbl_w.set(qn("w:w"), str(max_width_twips))
 
+    # Do not add tblInd when it is absent; default is already zero.
+    tbl_ind = tbl_pr.first_child_found_in("w:tblInd")
+    if tbl_ind is not None:
+        tbl_ind.set(qn("w:type"), "dxa")
+        tbl_ind.set(qn("w:w"), "0")
 
-def ensure_ordered(parent, tag, order):
-    node = parent.find(f"w:{tag}", NS)
-    if node is not None:
-        return node
-    node = ET.Element(W + tag)
-    target = order.get(tag, 999)
-    pos = len(parent)
-    for i, child in enumerate(list(parent)):
-        name = child.tag.rsplit("}", 1)[-1]
-        if order.get(name, 999) > target:
-            pos = i
-            break
-    parent.insert(pos, node)
-    return node
+    grid_cols = list(table._tbl.tblGrid.gridCol_lst)
+    widths = []
+    for col in grid_cols:
+        try:
+            widths.append(int(col.get(qn("w:w")) or "0"))
+        except ValueError:
+            widths.append(0)
 
+    total = sum(widths)
+    if widths and total > max_width_twips and total > 0:
+        scaled = []
+        used = 0
+        for index, width in enumerate(widths):
+            if index == len(widths) - 1:
+                new_width = max_width_twips - used
+            else:
+                new_width = max(
+                    1, round(width * max_width_twips / total)
+                )
+                used += new_width
+            scaled.append(new_width)
 
-def ensure_rpr(run):
-    rpr = run.find("w:rPr", NS)
-    if rpr is None:
-        rpr = ET.Element(W + "rPr")
-        run.insert(0, rpr)
-    return rpr
+        for col, width in zip(grid_cols, scaled):
+            col.set(qn("w:w"), str(width))
 
+    # Merged cells can be returned repeatedly by python-docx; process each tc only once.
+    seen_cells = set()
+    for row in table.rows:
+        for cell in row.cells:
+            key = id(cell._tc)
+            if key in seen_cells:
+                continue
+            seen_cells.add(key)
 
-def set_run_size(run, half_points):
-    rpr = ensure_rpr(run)
-    ensure_ordered(rpr, "sz", RPR_ORDER).set(W + "val", half_points)
-    ensure_ordered(rpr, "szCs", RPR_ORDER).set(W + "val", half_points)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
+            # Let tblGrid control width so a long cell cannot expand the whole table.
+            tcw = cell._tc.get_or_add_tcPr().get_or_add_tcW()
+            tcw.set(qn("w:type"), "auto")
+            tcw.set(qn("w:w"), "0")
 
-def set_margin_zero(margins, tag):
-    node = margins.find(f"w:{tag}", NS)
-    if node is None:
-        node = ET.Element(W + tag)
-        target = MARGIN_ORDER.get(tag, 99)
-        pos = len(margins)
-        for i, child in enumerate(list(margins)):
-            name = child.tag.rsplit("}", 1)[-1]
-            if MARGIN_ORDER.get(name, 99) > target:
-                pos = i
-                break
-        margins.insert(pos, node)
-    node.set(W + "w", "0")
-    node.set(W + "type", "dxa")
+            for paragraph in cell.paragraphs:
+                paragraph.style = table_style
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                set_indentation_zero(paragraph)
+                set_pagination_off(paragraph.paragraph_format)
+
+                for run in paragraph.runs:
+                    if run.text:
+                        run.font.size = Pt(TABLE_FONT_PT)
+
+            for nested in cell.tables:
+                normalize_table(nested, table_style, max_width_twips)
 
 
-def normalize_tables(doc):
-    for tbl in doc.findall(".//w:tbl", NS):
-        tblpr = tbl.find("w:tblPr", NS)
-        if tblpr is None:
-            tblpr = ET.Element(W + "tblPr")
-            tbl.insert(0, tblpr)
+def verify_output(path: Path) -> None:
+    """Fail before replacement if the generated package is structurally unreadable."""
+    with zipfile.ZipFile(path, "r") as zf:
+        bad_member = zf.testzip()
+        if bad_member:
+            raise RuntimeError(
+                f"corrupt ZIP member after normalization: {bad_member}"
+            )
 
-        tblind = ensure_ordered(tblpr, "tblInd", TBLPR_ORDER)
-        tblind.set(W + "w", "0")
-        tblind.set(W + "type", "dxa")
-
-        layout = ensure_ordered(tblpr, "tblLayout", TBLPR_ORDER)
-        layout.set(W + "type", "fixed")
-
-        tbl_cell_mar = ensure_ordered(tblpr, "tblCellMar", TBLPR_ORDER)
-        set_margin_zero(tbl_cell_mar, "left")
-        set_margin_zero(tbl_cell_mar, "right")
-
-        grid = tbl.find("w:tblGrid", NS)
-        widths = []
-        if grid is not None:
-            for col in grid.findall("w:gridCol", NS):
+        for name in zf.namelist():
+            if name.endswith((".xml", ".rels")):
                 try:
-                    widths.append(int(wa(col, "w") or "0"))
-                except ValueError:
-                    widths.append(0)
+                    etree.fromstring(zf.read(name))
+                except etree.XMLSyntaxError as exc:
+                    raise RuntimeError(
+                        f"invalid OOXML part after normalization: {name}: {exc}"
+                    ) from exc
 
-        total = sum(widths)
-        if widths and total > TABLE_MAX_WIDTH:
-            scaled = []
-            used = 0
-            for i, width in enumerate(widths):
-                if i == len(widths) - 1:
-                    new_width = TABLE_MAX_WIDTH - used
-                else:
-                    new_width = max(1, round(width * TABLE_MAX_WIDTH / total))
-                    used += new_width
-                scaled.append(new_width)
-            for col, width in zip(grid.findall("w:gridCol", NS), scaled):
-                col.set(W + "w", str(width))
-            target_width = sum(scaled)
-        elif widths and total > 0:
-            target_width = total
-        else:
-            target_width = TABLE_MAX_WIDTH
-
-        tblw = ensure_ordered(tblpr, "tblW", TBLPR_ORDER)
-        tblw.set(W + "w", str(min(target_width, TABLE_MAX_WIDTH)))
-        tblw.set(W + "type", "dxa")
-
-        for tc in tbl.findall(".//w:tc", NS):
-            tcpr = tc.find("w:tcPr", NS)
-            if tcpr is None:
-                tcpr = ET.Element(W + "tcPr")
-                tc.insert(0, tcpr)
-            tcw = ensure_ordered(tcpr, "tcW", TCPR_ORDER)
-            tcw.set(W + "w", "0")
-            tcw.set(W + "type", "auto")
-
-            tc_mar = ensure_ordered(tcpr, "tcMar", TCPR_ORDER)
-            set_margin_zero(tc_mar, "left")
-            set_margin_zero(tc_mar, "right")
-
-            valign = ensure_ordered(tcpr, "vAlign", TCPR_ORDER)
-            valign.set(W + "val", "center")
-
-            for p in tc.findall("w:p", NS):
-                ppr = p.find("w:pPr", NS)
-                if ppr is None:
-                    ppr = ET.Element(W + "pPr")
-                    p.insert(0, ppr)
-
-                ind = ensure_ordered(ppr, "ind", PPR_ORDER)
-                for key in (
-                    "left", "right", "firstLine", "hanging",
-                    "leftChars", "rightChars", "firstLineChars", "hangingChars",
-                    "start", "end", "startChars", "endChars",
-                ):
-                    ind.set(W + key, "0")
-
-                jc = ensure_ordered(ppr, "jc", PPR_ORDER)
-                jc.set(W + "val", "center")
-
-                for run in p.findall("w:r", NS):
-                    if "".join((t.text or "") for t in run.findall(".//w:t", NS)):
-                        set_run_size(run, TABLE_FONT_HALF_POINTS)
+    # A second python-docx open catches package/relationship/content-type failures.
+    Document(path)
 
 
-def normalize(src: Path, dst: Path):
-    with zipfile.ZipFile(src) as zin:
-        styles = ET.fromstring(zin.read("word/styles.xml"))
-        doc = ET.fromstring(zin.read("word/document.xml"))
-        by_id, by_name = maps(styles)
+def normalize(src: Path, dst: Path) -> None:
+    doc = Document(src)
 
-        body_style = by_name.get(BODY_STYLE)
-        if body_style is None:
-            raise ValueError(f"missing required style: {BODY_STYLE}")
-        body_id = wa(body_style, "styleId")
+    try:
+        body_style = doc.styles[BODY_STYLE]
+    except KeyError as exc:
+        raise RuntimeError(f"missing required style: {BODY_STYLE}") from exc
 
-        # Explicitly turn all four pagination checkboxes off for every paragraph style.
-        for s in styles.findall("w:style", NS):
-            if wa(s, "type") != "paragraph":
-                continue
-            ppr = ensure_ppr(s)
-            for tag in PAGINATION:
-                false_flag(ppr, tag)
+    body_style.paragraph_format.first_line_indent = Pt(BODY_FIRST_LINE_PT)
 
-        # Keep the body style's canonical two-character first-line indent.
-        ppr = ensure_ppr(body_style)
-        ind = ppr.find("w:ind", NS)
-        if ind is None:
-            ind = ET.SubElement(ppr, W + "ind")
-        ind.set(W + "firstLine", BODY_FIRST_LINE)
-        ind.attrib.pop(W + "hanging", None)
-        ind.attrib.pop(W + "hangingChars", None)
+    try:
+        table_style = doc.styles[TABLE_STYLE]
+    except KeyError:
+        table_style = doc.styles.add_style(
+            TABLE_STYLE, WD_STYLE_TYPE.PARAGRAPH
+        )
+        table_style.base_style = body_style
 
-        # A direct paragraph setting must never turn pagination back on.
-        for p in doc.findall(".//w:p", NS):
-            ppr = p.find("w:pPr", NS)
-            if ppr is None:
-                continue
-            for tag in PAGINATION:
-                if ppr.find(f"w:{tag}", NS) is not None:
-                    false_flag(ppr, tag)
+    table_style.font.size = Pt(TABLE_FONT_PT)
+    table_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    set_indentation_zero(table_style)
+    set_pagination_off(table_style.paragraph_format)
 
-        normalize_tables(doc)
+    # Explicitly disable all four pagination options on every paragraph style.
+    for style in doc.styles:
+        if style.type == WD_STYLE_TYPE.PARAGRAPH:
+            set_pagination_off(style.paragraph_format)
 
-        # Direct w:body children exclude table-cell paragraphs. Normalize ordinary prose.
-        body = doc.find("w:body", NS)
-        if body is not None:
-            for p in body.findall("w:p", NS):
-                txt = text_of(p)
-                if len(txt) < 12:
-                    continue
-                ppr = p.find("w:pPr", NS)
-                jc = ppr.find("w:jc", NS) if ppr is not None else None
-                if wa(jc, "val") in {"center", "right"}:
-                    continue
-                pstyle = ppr.find("w:pStyle", NS) if ppr is not None else None
-                sid = wa(pstyle, "val")
-                name = wa(by_id[sid].find("w:name", NS), "val") if sid in by_id else (NORMAL_STYLE if sid is None else None)
-                if name not in {NORMAL_STYLE, BODY_STYLE}:
-                    continue
-                if ppr is None:
-                    ppr = ET.Element(W + "pPr")
-                    p.insert(0, ppr)
-                if pstyle is None:
-                    pstyle = ET.Element(W + "pStyle")
-                    ppr.insert(0, pstyle)
-                pstyle.set(W + "val", body_id)
-                direct_ind = ppr.find("w:ind", NS)
-                if direct_ind is not None:
-                    for key in ("firstLine", "firstLineChars", "hanging", "hangingChars"):
-                        direct_ind.attrib.pop(W + key, None)
-                    if not direct_ind.attrib:
-                        ppr.remove(direct_ind)
+    # Main-body Normal prose becomes the canonical body style.
+    # doc.paragraphs does not include table-cell paragraphs.
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+        style_name = (
+            paragraph.style.name
+            if paragraph.style is not None
+            else "Normal"
+        )
+        if (
+            len(text) >= 12
+            and paragraph.alignment
+            not in (WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)
+            and style_name in {"Normal", BODY_STYLE}
+        ):
+            paragraph.style = body_style
+            # Remove direct indentation so 正文（默认） supplies 640 twips.
+            paragraph.paragraph_format.left_indent = None
+            paragraph.paragraph_format.right_indent = None
+            paragraph.paragraph_format.first_line_indent = None
 
-        replacements = {
-            "word/styles.xml": ET.tostring(styles, encoding="utf-8", xml_declaration=True),
-            "word/document.xml": ET.tostring(doc, encoding="utf-8", xml_declaration=True),
-        }
-        with zipfile.ZipFile(dst, "w") as zout:
-            for info in zin.infolist():
-                zout.writestr(info, replacements.get(info.filename, zin.read(info.filename)))
+    # Direct paragraph formatting must not re-enable pagination.
+    for paragraph in iter_all_paragraphs(doc):
+        set_pagination_off(paragraph.paragraph_format)
+
+    max_width = usable_width_twips(doc)
+    for table in doc.tables:
+        normalize_table(table, table_style, max_width)
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(dst)
+    verify_output(dst)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("document", type=Path)
-    group = ap.add_mutually_exclusive_group(required=True)
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Safely normalize body indentation, pagination options, "
+            "and table formatting in DOCX."
+        )
+    )
+    parser.add_argument("document", type=Path)
+    group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--in-place", action="store_true")
     group.add_argument("--out", type=Path)
-    args = ap.parse_args()
+    args = parser.parse_args()
 
     if args.in_place:
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td) / args.document.name
-            normalize(args.document, tmp)
-            shutil.copy2(tmp, args.document)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir) / args.document.name
+            normalize(args.document, temp_path)
+            # Only replace the original after every verification step has passed.
+            os.replace(temp_path, args.document)
         target = args.document
     else:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
         normalize(args.document, args.out)
         target = args.out
 
-    print(f"Normalized: {target}")
+    print(f"Normalized and verified: {target}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
