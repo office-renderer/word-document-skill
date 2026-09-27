@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Normalize mechanically enforceable Word rules from config/rules.json."""
+"""Apply Word formatting rules and repair validator-reported issues."""
 
 from __future__ import annotations
 
@@ -8,12 +8,14 @@ import json
 import os
 import tempfile
 import zipfile
+from copy import deepcopy
 from pathlib import Path
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
 from lxml import etree
@@ -22,13 +24,24 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RULES = ROOT / "config" / "rules.json"
 TWIP_EMU = 635
 
+ALL_GROUPS = {"body", "pagination", "table", "page", "footer", "metadata"}
 PARAGRAPH_ALIGNMENTS = {"center": WD_ALIGN_PARAGRAPH.CENTER}
 VERTICAL_ALIGNMENTS = {"center": WD_CELL_VERTICAL_ALIGNMENT.CENTER}
 
 
-def load_rules(path: Path) -> dict:
+def load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def groups_from_report(path: Path) -> set[str]:
+    report = load_json(path)
+    groups = {
+        item.get("fix_group")
+        for item in report.get("issues", [])
+        if item.get("auto_fixable") and item.get("fix_group")
+    }
+    return groups & ALL_GROUPS
 
 
 def apply_pagination_rules(fmt, rules: dict) -> None:
@@ -37,7 +50,6 @@ def apply_pagination_rules(fmt, rules: dict) -> None:
 
 
 def clear_direct_pagination_overrides(fmt, rules: dict) -> None:
-    # Missing direct properties already inherit the style; only neutralize actual True overrides.
     for name in rules["pagination"]["disable"]:
         if getattr(fmt, name) is True:
             setattr(fmt, name, False)
@@ -64,6 +76,37 @@ def set_indentation_zero(paragraph_or_style) -> None:
 
     for name in ("hanging", "hangingChars"):
         ind.attrib.pop(qn(f"w:{name}"), None)
+
+
+def copy_style_format(target_doc, template_doc, name: str):
+    try:
+        source = template_doc.styles[name]
+    except KeyError:
+        return None
+
+    try:
+        target = target_doc.styles[name]
+    except KeyError:
+        target = target_doc.styles.add_style(name, source.type)
+
+    source_el = source._element
+    target_el = target._element
+
+    for tag in ("w:pPr", "w:rPr"):
+        old = target_el.find(qn(tag))
+        if old is not None:
+            target_el.remove(old)
+        new = source_el.find(qn(tag))
+        if new is not None:
+            target_el.append(deepcopy(new))
+
+    if source.base_style is not None:
+        try:
+            target.base_style = target_doc.styles[source.base_style.name]
+        except KeyError:
+            pass
+
+    return target
 
 
 def iter_table_paragraphs(table):
@@ -110,19 +153,29 @@ def usable_width_twips(doc, configured_max: int) -> int:
     return min([configured_max, *widths]) if widths else configured_max
 
 
+def ensure_tbl_child(tbl_pr, tag: str):
+    node = tbl_pr.find(qn(tag))
+    if node is None:
+        node = OxmlElement(tag)
+        tbl_pr.append(node)
+    return node
+
+
 def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
     table.autofit = rules["table"]["layout"] != "fixed"
 
     tbl_pr = table._tbl.tblPr
-    tbl_w = tbl_pr.first_child_found_in("w:tblW")
-    if tbl_w is not None:
-        tbl_w.set(qn("w:type"), "dxa")
-        tbl_w.set(qn("w:w"), str(max_width))
+    tbl_w = ensure_tbl_child(tbl_pr, "w:tblW")
+    tbl_w.set(qn("w:type"), "dxa")
+    tbl_w.set(qn("w:w"), str(max_width))
 
-    tbl_ind = tbl_pr.first_child_found_in("w:tblInd")
+    tbl_ind = tbl_pr.find(qn("w:tblInd"))
     if tbl_ind is not None:
         tbl_ind.set(qn("w:type"), "dxa")
         tbl_ind.set(qn("w:w"), "0")
+
+    layout = ensure_tbl_child(tbl_pr, "w:tblLayout")
+    layout.set(qn("w:type"), rules["table"]["layout"])
 
     grid_cols = list(table._tbl.tblGrid.gridCol_lst)
     widths = []
@@ -158,7 +211,6 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
             seen_cells.add(key)
 
             cell.vertical_alignment = v_align
-
             tcw = cell._tc.get_or_add_tcPr().get_or_add_tcW()
             tcw.set(qn("w:type"), "auto")
             tcw.set(qn("w:w"), "0")
@@ -171,10 +223,45 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
                 clear_direct_pagination_overrides(paragraph.paragraph_format, rules)
                 for run in paragraph.runs:
                     if run.text:
-                        run.font.size = Pt(rules["table"]["font_pt"])
+                        current = run.font.size.pt if run.font.size is not None else None
+                        if current is None or current < rules["table"]["font_pt"]:
+                            run.font.size = Pt(rules["table"]["font_pt"])
 
             for nested in cell.tables:
                 normalize_table(nested, table_style, rules, max_width)
+
+
+def copy_page_setup(doc, template_doc) -> None:
+    source = template_doc.sections[-1]
+    attrs = (
+        "page_width", "page_height", "orientation",
+        "top_margin", "bottom_margin", "left_margin", "right_margin",
+        "header_distance", "footer_distance", "gutter",
+    )
+    for section in doc.sections:
+        for name in attrs:
+            setattr(section, name, getattr(source, name))
+
+
+def replace_story_content(target_story, source_story) -> None:
+    target_el = target_story._element
+    for child in list(target_el):
+        target_el.remove(child)
+    for child in source_story._element:
+        target_el.append(deepcopy(child))
+
+
+def copy_footers(doc, template_doc) -> None:
+    doc.settings.odd_and_even_pages_header_footer = (
+        template_doc.settings.odd_and_even_pages_header_footer
+    )
+    source = template_doc.sections[-1]
+
+    for section in doc.sections:
+        section.footer.is_linked_to_previous = False
+        section.even_page_footer.is_linked_to_previous = False
+        replace_story_content(section.footer, source.footer)
+        replace_story_content(section.even_page_footer, source.even_page_footer)
 
 
 def strip_package_metadata(path: Path, rules: dict) -> None:
@@ -227,107 +314,133 @@ def strip_package_metadata(path: Path, rules: dict) -> None:
 
 
 def quick_safety_check(path: Path, rules: dict) -> None:
-    required = rules["validation"]["quick_required_parts"]
     with zipfile.ZipFile(path, "r") as zf:
         names = set(zf.namelist())
-        missing = [name for name in required if name not in names]
-        if missing:
-            raise RuntimeError(f"missing required OOXML parts: {missing}")
-        for name in required:
+        for name in rules["validation"]["quick_required_parts"]:
+            if name not in names:
+                raise RuntimeError(f"missing required OOXML part: {name}")
             if name.endswith((".xml", ".rels")):
                 etree.fromstring(zf.read(name))
         for name in rules["metadata"]["remove_parts"]:
             if name in names:
-                raise RuntimeError(f"metadata part remains after cleanup: {name}")
+                raise RuntimeError(f"metadata part remains: {name}")
 
     Document(path)
 
 
-def normalize(src: Path, dst: Path, rules: dict) -> None:
+def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None:
     doc = Document(src)
+    template = Document(ROOT / rules["template_path"])
 
     body_name = rules["body"]["style"]
-    try:
-        body_style = doc.styles[body_name]
-    except KeyError as exc:
-        raise RuntimeError(f"missing required style: {body_name}") from exc
+    body_style = None
 
-    body_style.paragraph_format.first_line_indent = Pt(
-        rules["body"]["first_line_twips"] / 20
-    )
+    if "body" in groups:
+        body_style = copy_style_format(doc, template, body_name)
+        if body_style is None:
+            raise RuntimeError(f"template is missing required body style: {body_name}")
+        body_style.paragraph_format.first_line_indent = Pt(
+            rules["body"]["first_line_twips"] / 20
+        )
 
-    table_name = rules["table"]["paragraph_style"]
-    try:
-        table_style = doc.styles[table_name]
-    except KeyError:
-        table_style = doc.styles.add_style(table_name, WD_STYLE_TYPE.PARAGRAPH)
-        table_style.base_style = body_style
+        auto_from = set(rules["body"]["auto_map_from_styles"])
+        min_chars = int(rules["body"]["auto_map_min_chars"])
+        for paragraph in doc.paragraphs:
+            text = paragraph.text.strip()
+            style_name = paragraph.style.name if paragraph.style is not None else "Normal"
+            if (
+                len(text) >= min_chars
+                and style_name in auto_from | {body_name}
+                and paragraph.alignment
+                not in (WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)
+            ):
+                paragraph.style = body_style
+                paragraph.paragraph_format.left_indent = None
+                paragraph.paragraph_format.right_indent = None
+                paragraph.paragraph_format.first_line_indent = None
 
-    table_style.font.size = Pt(rules["table"]["font_pt"])
-    table_style.paragraph_format.alignment = PARAGRAPH_ALIGNMENTS[
-        rules["table"]["horizontal_alignment"]
-    ]
-    if rules["table"]["zero_indentation"]:
-        set_indentation_zero(table_style)
-    apply_pagination_rules(table_style.paragraph_format, rules)
+    if "pagination" in groups:
+        for style in doc.styles:
+            if style.type == WD_STYLE_TYPE.PARAGRAPH:
+                apply_pagination_rules(style.paragraph_format, rules)
+        for paragraph in iter_all_paragraphs(doc):
+            clear_direct_pagination_overrides(paragraph.paragraph_format, rules)
 
-    for style in doc.styles:
-        if style.type == WD_STYLE_TYPE.PARAGRAPH:
-            apply_pagination_rules(style.paragraph_format, rules)
+    if "table" in groups:
+        if body_style is None:
+            try:
+                body_style = doc.styles[body_name]
+            except KeyError:
+                body_style = copy_style_format(doc, template, body_name)
 
-    auto_from = set(rules["body"]["auto_map_from_styles"])
-    min_chars = int(rules["body"]["auto_map_min_chars"])
-    for paragraph in doc.paragraphs:
-        text = paragraph.text.strip()
-        style_name = paragraph.style.name if paragraph.style is not None else "Normal"
-        if (
-            len(text) >= min_chars
-            and style_name in auto_from | {body_name}
-            and paragraph.alignment
-            not in (WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)
-        ):
-            paragraph.style = body_style
-            paragraph.paragraph_format.left_indent = None
-            paragraph.paragraph_format.right_indent = None
-            paragraph.paragraph_format.first_line_indent = None
+        table_name = rules["table"]["paragraph_style"]
+        try:
+            table_style = doc.styles[table_name]
+        except KeyError:
+            table_style = doc.styles.add_style(table_name, WD_STYLE_TYPE.PARAGRAPH)
+            table_style.base_style = body_style
 
-    for paragraph in iter_all_paragraphs(doc):
-        clear_direct_pagination_overrides(paragraph.paragraph_format, rules)
+        table_style.font.size = Pt(rules["table"]["font_pt"])
+        table_style.paragraph_format.alignment = PARAGRAPH_ALIGNMENTS[
+            rules["table"]["horizontal_alignment"]
+        ]
+        if rules["table"]["zero_indentation"]:
+            set_indentation_zero(table_style)
+        apply_pagination_rules(table_style.paragraph_format, rules)
 
-    max_width = usable_width_twips(doc, int(rules["table"]["max_width_twips"]))
-    for table in doc.tables:
-        normalize_table(table, table_style, rules, max_width)
+        max_width = usable_width_twips(doc, int(rules["table"]["max_width_twips"]))
+        for table in doc.tables:
+            normalize_table(table, table_style, rules, max_width)
+
+    if "page" in groups:
+        copy_page_setup(doc, template)
+
+    if "footer" in groups:
+        copy_footers(doc, template)
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     doc.save(dst)
-    strip_package_metadata(dst, rules)
+
+    if "metadata" in groups or not groups:
+        strip_package_metadata(dst, rules)
+    else:
+        # python-docx may create core properties on save; final files must always be clean.
+        strip_package_metadata(dst, rules)
+
     quick_safety_check(dst, rules)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Normalize Word formatting and metadata using config/rules.json."
+        description="Apply Word formatting or targeted fixes from a validator report."
     )
     parser.add_argument("document", type=Path)
     parser.add_argument("--rules", type=Path, default=DEFAULT_RULES)
+    parser.add_argument("--fix", type=Path, help="validator JSON report for targeted repair")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--in-place", action="store_true")
     group.add_argument("--out", type=Path)
     args = parser.parse_args()
 
-    rules = load_rules(args.rules)
+    rules = load_json(args.rules)
+    groups = groups_from_report(args.fix) if args.fix else set(ALL_GROUPS)
+
+    if args.fix and not groups:
+        print("No auto-fixable formatting groups found in validator report.")
+        return 2
 
     if args.in_place:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir) / args.document.name
-            normalize(args.document, temp_path, rules)
+            format_document(args.document, temp_path, rules, groups)
             os.replace(temp_path, args.document)
         target = args.document
     else:
-        normalize(args.document, args.out, rules)
+        format_document(args.document, args.out, rules, groups)
         target = args.out
 
-    print(f"Normalized: {target}")
+    print("Formatted:", target)
+    print("Applied groups:", ", ".join(sorted(groups)))
     return 0
 
 
