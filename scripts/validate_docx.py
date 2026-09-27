@@ -293,6 +293,12 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
         if w_attr(layout, "type") != "fixed":
             errors.append(f"table {t_idx}: tblLayout must be fixed")
 
+        tbl_cell_mar = tblpr.find("w:tblCellMar", NS) if tblpr is not None else None
+        for side in ("left", "right"):
+            node = tbl_cell_mar.find(f"w:{side}", NS) if tbl_cell_mar is not None else None
+            if w_attr(node, "w") != "0":
+                errors.append(f"table {t_idx}: {side} cell margin must be explicitly 0")
+
         grid = tbl.find("w:tblGrid", NS)
         if grid is not None:
             total = 0
@@ -310,6 +316,11 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
             tcw = tcpr.find("w:tcW", NS) if tcpr is not None else None
             if w_attr(tcw, "type") != "auto":
                 errors.append(f"table {t_idx} cell {c_idx}: preferred cell width must be auto")
+            tc_mar = tcpr.find("w:tcMar", NS) if tcpr is not None else None
+            for side in ("left", "right"):
+                node = tc_mar.find(f"w:{side}", NS) if tc_mar is not None else None
+                if w_attr(node, "w") != "0":
+                    errors.append(f"table {t_idx} cell {c_idx}: {side} cell margin must be explicitly 0")
             if w_attr(valign, "val") != "center":
                 errors.append(f"table {t_idx} cell {c_idx}: vertical alignment must be center")
 
@@ -319,11 +330,15 @@ def table_rule_errors(document_root: ET.Element) -> list[str]:
                 ind = ppr.find("w:ind", NS) if ppr is not None else None
                 if w_attr(jc, "val") != "center":
                     errors.append(f"table {t_idx} cell {c_idx} paragraph {p_idx}: alignment must be center")
-                if ind is None or any(
-                    w_attr(ind, key) not in {None, "0"}
-                    for key in ("left", "right", "firstLine", "hanging", "leftChars", "rightChars", "firstLineChars", "hangingChars")
-                ):
-                    errors.append(f"table {t_idx} cell {c_idx} paragraph {p_idx}: indentation must be zero")
+                indent_keys = (
+                    "left", "right", "firstLine", "hanging",
+                    "leftChars", "rightChars", "firstLineChars", "hangingChars",
+                    "start", "end", "startChars", "endChars",
+                )
+                if ind is None or any(w_attr(ind, key) != "0" for key in indent_keys):
+                    errors.append(
+                        f"table {t_idx} cell {c_idx} paragraph {p_idx}: all indentation attributes must be explicitly zero"
+                    )
 
                 for r_idx, run in enumerate(p.findall("w:r", NS), 1):
                     if not "".join((t.text or "") for t in run.findall(".//w:t", NS)):
