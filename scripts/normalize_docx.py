@@ -29,7 +29,27 @@ def false_flag(ppr, tag):
     node = ppr.find(f"w:{tag}", NS)
     if node is None:
         node = ET.Element(W + tag)
-        ppr.append(node)
+        order = {
+            "pStyle": 0,
+            "keepNext": 1,
+            "keepLines": 2,
+            "pageBreakBefore": 3,
+            "framePr": 4,
+            "widowControl": 5,
+            "numPr": 6,
+            "spacing": 20,
+            "ind": 21,
+            "jc": 25,
+            "outlineLvl": 29,
+        }
+        target = order[tag]
+        pos = len(ppr)
+        for i, child in enumerate(list(ppr)):
+            child_name = child.tag.rsplit("}", 1)[-1]
+            if order.get(child_name, 99) > target:
+                pos = i
+                break
+        ppr.insert(pos, node)
     node.set(W + "val", "0")
 
 
@@ -41,7 +61,7 @@ def ensure_ppr(parent):
         if rpr is not None:
             parent.insert(list(parent).index(rpr), ppr)
         else:
-            parent.insert(0, ppr)
+            parent.append(ppr)
     return ppr
 
 
