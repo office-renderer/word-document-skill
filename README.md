@@ -52,7 +52,7 @@ ChatGPT / Codex / Claude Code 都可以直接使用：
 依赖：
 
 ```bash
-pip install python-docx lxml
+pip install -r requirements.txt
 ```
 
 ## 仓库结构

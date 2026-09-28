@@ -84,48 +84,21 @@ def attrs(el: ET.Element | None, names):
     return {name: w_attr(el, name) for name in names}
 
 
-def default_paragraph_style_id(styles: ET.Element) -> str | None:
-    for style in styles.findall("w:style", NS):
-        if (
-            w_attr(style, "type") == "paragraph"
-            and (w_attr(style, "default") or "").lower() in {"1", "true", "on"}
-        ):
-            return w_attr(style, "styleId")
-    return None
-
-
-def style_font_slots(style_id, styles, by_id):
-    east = None
-    ascii_font = None
-    hansi_font = None
-    seen = set()
-    sid = style_id or default_paragraph_style_id(styles)
-
-    while sid and sid in by_id and sid not in seen:
-        seen.add(sid)
-        style = by_id[sid]
-        rfonts = style.find("w:rPr/w:rFonts", NS)
-        if rfonts is not None:
-            east = east or w_attr(rfonts, "eastAsia")
-            ascii_font = ascii_font or w_attr(rfonts, "ascii")
-            hansi_font = hansi_font or w_attr(rfonts, "hAnsi")
-        sid = w_attr(style.find("w:basedOn", NS), "val")
-
-    defaults = styles.find("w:docDefaults/w:rPrDefault/w:rPr/w:rFonts", NS)
-    if defaults is not None:
-        east = east or w_attr(defaults, "eastAsia")
-        ascii_font = ascii_font or w_attr(defaults, "ascii")
-        hansi_font = hansi_font or w_attr(defaults, "hAnsi")
-
-    return east, ascii_font or hansi_font
-
-
-def style_format_signature(style, by_id):
+def style_format_signature(style, by_id, ignored_ppr_tags=()):
+    """Compare template style formatting while ignoring deliberate runtime overrides."""
     based_id = w_attr(style.find("w:basedOn", NS), "val")
     based_name = None
     if based_id and based_id in by_id:
         based_name = w_attr(by_id[based_id].find("w:name", NS), "val")
+
     ppr = style.find("w:pPr", NS)
+    if ppr is not None:
+        ppr = ET.fromstring(ET.tostring(ppr))
+        for tag in ignored_ppr_tags:
+            child = ppr.find(f"w:{tag}", NS)
+            if child is not None:
+                ppr.remove(child)
+
     rpr = style.find("w:rPr", NS)
     return (
         based_name,
@@ -357,7 +330,11 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
                 style=name,
             ))
             continue
-        if style_format_signature(target_style, by_id) != style_format_signature(ref_style, ref_by_id):
+        ignored = [
+            PAGINATION_OOXML[item]
+            for item in rules["pagination"]["disable"]
+        ]
+        if style_format_signature(target_style, by_id, ignored) != style_format_signature(ref_style, ref_by_id, ignored):
             issues.append(issue(
                 "STY-MISMATCH",
                 f"Style differs from template: {name}",

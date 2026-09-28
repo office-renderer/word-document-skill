@@ -537,9 +537,15 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
         sync_template_styles(doc, template, rules)
 
     if "body" in groups:
-        body_style = copy_style_format(doc, template, body_name)
-        if body_style is None:
-            raise RuntimeError(f"template is missing required body style: {body_name}")
+        if "styles" in groups:
+            try:
+                body_style = doc.styles[body_name]
+            except KeyError as exc:
+                raise RuntimeError(f"missing synchronized body style: {body_name}") from exc
+        else:
+            body_style = copy_style_format(doc, template, body_name)
+            if body_style is None:
+                raise RuntimeError(f"template is missing required body style: {body_name}")
         body_style.paragraph_format.first_line_indent = Pt(
             rules["body"]["first_line_twips"] / 20
         )
