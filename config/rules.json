@@ -1,8 +1,9 @@
 {
-  "version": 2,
+  "version": 3,
   "template_path": "assets/公文排版Word模板.dotx",
   "workflow": {
-    "max_auto_repairs": 2
+    "max_auto_repairs": 2,
+    "validate_first": true
   },
   "styles": {
     "sync_from_template": [
@@ -43,10 +44,13 @@
       "page_break_before"
     ]
   },
+  "page": {
+    "preserve_existing_orientation": true
+  },
   "table": {
     "paragraph_style": "表格正文",
     "font_pt": 14,
-    "max_width_twips": 8845,
+    "fallback_max_width_twips": 8845,
     "layout": "fixed",
     "horizontal_alignment": "center",
     "vertical_alignment": "center",

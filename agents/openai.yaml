@@ -1,4 +1,4 @@
 interface:
   display_name: "Word 文档排版"
-  short_description: "固定模板排版、校验并限次自动修复"
-  default_prompt: "Use $word-document-skill only for Word formatting. Run scripts/run_skill.py on the DOCX. Preserve substantive content. If the bounded repair loop stops with validator codes, report them instead of inventing another formatting procedure. Use strict validation or PDF rendering only when needed."
+  short_description: "先校验，再按模板定向修复 Word 排版"
+  default_prompt: "Use $word-document-skill only for Word formatting. Run scripts/run_skill.py. It validates first and applies only targeted repairs. Preserve substantive content and existing portrait/landscape section orientation. If the bounded repair loop stops with validator codes, report them instead of inventing another formatting procedure."

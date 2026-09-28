@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import tempfile
 import zipfile
 from copy import deepcopy
 from pathlib import Path
 
 from docx import Document
+from docx.enum.section import WD_ORIENT
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -146,22 +148,48 @@ def iter_all_paragraphs(doc):
                 yield from iter_table_paragraphs(table)
 
 
-def usable_width_twips(doc, configured_max: int) -> int:
+def section_usable_width_twips(section, fallback: int) -> int:
+    if (
+        section.page_width is None
+        or section.left_margin is None
+        or section.right_margin is None
+    ):
+        return fallback
+    value = int(
+        (section.page_width - section.left_margin - section.right_margin)
+        / TWIP_EMU
+    )
+    return value if value > 0 else fallback
+
+
+def top_level_table_section_widths(doc, fallback: int) -> list[int]:
+    """Map each top-level body table to the usable width of its actual section."""
     widths = []
-    for section in doc.sections:
-        if (
-            section.page_width is None
-            or section.left_margin is None
-            or section.right_margin is None
-        ):
+    sections = list(doc.sections)
+    if not sections:
+        return [fallback] * len(doc.tables)
+
+    section_index = 0
+    body = doc.element.body
+
+    for child in body.iterchildren():
+        if child.tag == qn("w:tbl"):
+            section = sections[min(section_index, len(sections) - 1)]
+            widths.append(section_usable_width_twips(section, fallback))
             continue
-        value = int(
-            (section.page_width - section.left_margin - section.right_margin)
-            / TWIP_EMU
-        )
-        if value > 0:
-            widths.append(value)
-    return min([configured_max, *widths]) if widths else configured_max
+
+        if child.tag == qn("w:p"):
+            ppr = child.find(qn("w:pPr"))
+            sectpr = ppr.find(qn("w:sectPr")) if ppr is not None else None
+            if sectpr is not None:
+                section_index += 1
+
+    if len(widths) != len(doc.tables):
+        return [
+            section_usable_width_twips(sections[-1], fallback)
+            for _ in doc.tables
+        ]
+    return widths
 
 
 def document_default_font_slots(doc) -> tuple[str | None, str | None]:
@@ -201,26 +229,74 @@ def style_font_slots(style, doc) -> tuple[str | None, str | None]:
     return east or default_east, ascii_font or hansi_font or default_west
 
 
-def text_script_kind(char: str) -> str:
-    return "western" if char.isascii() else "east_asia"
+def is_east_asian_signal(char: str) -> bool:
+    code = ord(char)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0x3040 <= code <= 0x30FF
+        or 0xAC00 <= code <= 0xD7AF
+    )
+
+
+def is_western_signal(char: str) -> bool:
+    return char.isascii() and char.isalnum()
+
+
+def mixed_script_flags(text: str) -> tuple[bool, bool]:
+    return (
+        any(is_east_asian_signal(char) for char in text),
+        any(is_western_signal(char) for char in text),
+    )
 
 
 def split_script_segments(text: str) -> list[tuple[str, str]]:
-    if not text:
-        return []
-    segments = []
-    kind = text_script_kind(text[0])
-    buf = [text[0]]
+    """Split only true East-Asian/ASCII-alphanumeric mixtures.
 
-    for char in text[1:]:
-        next_kind = text_script_kind(char)
+    Spaces and punctuation are neutral and attach to adjacent text so they do
+    not create extra runs by themselves.
+    """
+    has_east, has_west = mixed_script_flags(text)
+    if not (has_east and has_west):
+        return []
+
+    raw_kinds = []
+    for char in text:
+        if is_east_asian_signal(char):
+            raw_kinds.append("east_asia")
+        elif is_western_signal(char):
+            raw_kinds.append("western")
+        else:
+            raw_kinds.append(None)
+
+    # Attach neutral characters to the previous script; leading neutrals use
+    # the next script. This minimizes run count without changing characters.
+    next_kind = None
+    next_kinds = [None] * len(raw_kinds)
+    for index in range(len(raw_kinds) - 1, -1, -1):
+        if raw_kinds[index] is not None:
+            next_kind = raw_kinds[index]
+        next_kinds[index] = next_kind
+
+    resolved = []
+    previous = None
+    for index, kind in enumerate(raw_kinds):
+        if kind is None:
+            kind = previous or next_kinds[index] or "east_asia"
+        resolved.append(kind)
+        previous = kind
+
+    segments = []
+    kind = resolved[0]
+    buf = [text[0]]
+    for char, next_kind in zip(text[1:], resolved[1:]):
         if next_kind == kind:
             buf.append(char)
         else:
             segments.append((kind, "".join(buf)))
             kind = next_kind
             buf = [char]
-
     segments.append((kind, "".join(buf)))
     return segments
 
@@ -276,18 +352,29 @@ def replace_run_with_segments(run_el, segments, east_font: str, west_font: str) 
 
 
 def normalize_paragraph_runs(paragraph, doc, rules: dict) -> None:
-    """Split plain mixed-script runs; preserve direct fonts and fill missing slots from styles."""
+    """Split only true mixed-script plain runs; leave pure runs untouched."""
+    if not rules["fonts"]["split_mixed_runs"]:
+        return
+
     try:
         style = paragraph.style
     except (KeyError, ValueError):
         style = None
 
-    style_east, style_west = style_font_slots(style, doc) if style is not None else document_default_font_slots(doc)
+    style_east, style_west = (
+        style_font_slots(style, doc)
+        if style is not None
+        else document_default_font_slots(doc)
+    )
 
     for run in list(paragraph.runs):
         run_el = run._r
         text = plain_run_text(run_el)
         if text is None or not text:
+            continue
+
+        segments = split_script_segments(text)
+        if not segments:
             continue
 
         direct_east, direct_west = direct_run_font_slots(run_el)
@@ -296,19 +383,19 @@ def normalize_paragraph_runs(paragraph, doc, rules: dict) -> None:
 
         if not east_font or not west_font:
             raise RuntimeError(
-                f"cannot resolve East Asian/Western fonts for paragraph text: {paragraph.text[:60]!r}"
+                f"cannot resolve East Asian/Western fonts for mixed run: {text[:60]!r}"
             )
 
-        segments = split_script_segments(text)
-        if rules["fonts"]["split_mixed_runs"] and len(segments) > 1:
-            replace_run_with_segments(run_el, segments, east_font, west_font)
-        else:
-            set_explicit_run_fonts(run_el, east_font, west_font)
+        replace_run_with_segments(run_el, segments, east_font, west_font)
 
 
 def normalize_document_runs(doc, rules: dict) -> None:
     seen = set()
-    for paragraph in iter_all_paragraphs(doc):
+    paragraphs = list(doc.paragraphs)
+    for table in doc.tables:
+        paragraphs.extend(iter_table_paragraphs(table))
+
+    for paragraph in paragraphs:
         key = id(paragraph._p)
         if key in seen:
             continue
@@ -429,15 +516,34 @@ def set_theme_font_language(doc, rules: dict) -> None:
     node.set(qn("w:eastAsia"), rules["language"]["theme_font_east_asia"])
 
 
-def copy_page_setup(doc, template_doc) -> None:
+def copy_page_setup(doc, template_doc, rules: dict) -> None:
+    """Apply template page geometry without destroying existing section orientation."""
     source = template_doc.sections[-1]
-    attrs = (
-        "page_width", "page_height", "orientation",
-        "top_margin", "bottom_margin", "left_margin", "right_margin",
-        "header_distance", "footer_distance", "gutter",
-    )
+    preserve_orientation = rules["page"]["preserve_existing_orientation"]
+
     for section in doc.sections:
-        for name in attrs:
+        is_landscape = (
+            section.orientation == WD_ORIENT.LANDSCAPE
+            or (
+                section.page_width is not None
+                and section.page_height is not None
+                and section.page_width > section.page_height
+            )
+        )
+
+        if preserve_orientation and is_landscape:
+            section.orientation = WD_ORIENT.LANDSCAPE
+            section.page_width = source.page_height
+            section.page_height = source.page_width
+        else:
+            section.orientation = source.orientation
+            section.page_width = source.page_width
+            section.page_height = source.page_height
+
+        for name in (
+            "top_margin", "bottom_margin", "left_margin", "right_margin",
+            "header_distance", "footer_distance", "gutter",
+        ):
             setattr(section, name, getattr(source, name))
 
 
@@ -455,11 +561,11 @@ def copy_footers(doc, template_doc) -> None:
     )
     source = template_doc.sections[-1]
 
-    for section in doc.sections:
-        section.footer.is_linked_to_previous = False
-        section.even_page_footer.is_linked_to_previous = False
-        replace_story_content(section.footer, source.footer)
-        replace_story_content(section.even_page_footer, source.even_page_footer)
+    section = doc.sections[-1]
+    section.footer.is_linked_to_previous = False
+    section.even_page_footer.is_linked_to_previous = False
+    replace_story_content(section.footer, source.footer)
+    replace_story_content(section.even_page_footer, source.even_page_footer)
 
 
 def strip_package_metadata(path: Path, rules: dict) -> None:
@@ -527,6 +633,13 @@ def quick_safety_check(path: Path, rules: dict) -> None:
 
 
 def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None:
+    if groups == {"metadata"}:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        strip_package_metadata(dst, rules)
+        quick_safety_check(dst, rules)
+        return
+
     doc = Document(src)
     template = Document(ROOT / rules["template_path"])
 
@@ -595,15 +708,16 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
             set_indentation_zero(table_style)
         apply_pagination_rules(table_style.paragraph_format, rules)
 
-        max_width = usable_width_twips(doc, int(rules["table"]["max_width_twips"]))
-        for table in doc.tables:
+        fallback_width = int(rules["table"]["fallback_max_width_twips"])
+        table_widths = top_level_table_section_widths(doc, fallback_width)
+        for table, max_width in zip(doc.tables, table_widths):
             normalize_table(table, table_style, rules, max_width)
 
     if "language" in groups:
         set_theme_font_language(doc, rules)
 
     if "page" in groups:
-        copy_page_setup(doc, template)
+        copy_page_setup(doc, template, rules)
 
     if "footer" in groups:
         copy_footers(doc, template)

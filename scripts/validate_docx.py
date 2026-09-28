@@ -123,14 +123,32 @@ def plain_run_text(run):
     return "".join(t.text or "" for t in texts)
 
 
+def is_east_asian_signal(char: str) -> bool:
+    code = ord(char)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0x3040 <= code <= 0x30FF
+        or 0xAC00 <= code <= 0xD7AF
+    )
+
+
+def is_western_signal(char: str) -> bool:
+    return char.isascii() and char.isalnum()
+
+
 def script_flags(text: str) -> tuple[bool, bool]:
-    east = any((not c.isascii()) for c in text if not c.isspace())
-    west = any(c.isascii() for c in text if not c.isspace())
-    return east, west
+    return (
+        any(is_east_asian_signal(char) for char in text),
+        any(is_western_signal(char) for char in text),
+    )
 
 
 def font_issues_for_paragraph(p, paragraph_index, location, rules):
     result = []
+    if not rules["fonts"]["split_mixed_runs"]:
+        return result
 
     for run_index, run in enumerate(p.findall("w:r", NS), 1):
         text = plain_run_text(run)
@@ -138,55 +156,21 @@ def font_issues_for_paragraph(p, paragraph_index, location, rules):
             continue
 
         has_east, has_west = script_flags(text)
-
-        if rules["fonts"]["split_mixed_runs"] and has_east and has_west:
+        if has_east and has_west:
             result.append(issue(
                 "FONT-MIXED-RUN",
-                f"{location} paragraph {paragraph_index} run {run_index} mixes East Asian and ASCII text",
+                f"{location} paragraph {paragraph_index} run {run_index} mixes East Asian and ASCII alphanumeric text",
                 "font",
                 location=location,
                 paragraph=paragraph_index,
                 run=run_index,
                 text=text[:80],
             ))
-            continue
-
-        rpr = run.find("w:rPr", NS)
-        rfonts = rpr.find("w:rFonts", NS) if rpr is not None else None
-
-        if has_east and not w_attr(rfonts, "eastAsia"):
-            result.append(issue(
-                "FONT-EAST-ASIA-MISSING",
-                f"{location} paragraph {paragraph_index} run {run_index} has no explicit East Asian font",
-                "font",
-                location=location,
-                paragraph=paragraph_index,
-                run=run_index,
-            ))
-
-        if has_west:
-            ascii_font = w_attr(rfonts, "ascii")
-            hansi_font = w_attr(rfonts, "hAnsi")
-            if not ascii_font or not hansi_font:
-                result.append(issue(
-                    "FONT-WESTERN-MISSING",
-                    f"{location} paragraph {paragraph_index} run {run_index} has incomplete Western font slots",
-                    "font",
-                    location=location,
-                    paragraph=paragraph_index,
-                    run=run_index,
-                    ascii=ascii_font,
-                    hAnsi=hansi_font,
-                ))
 
     return result
 
 
-def section_signature(document: ET.Element) -> dict:
-    sections = document.findall(".//w:sectPr", NS)
-    if not sections:
-        raise ValueError("document contains no sectPr")
-    sect = sections[-1]
+def one_section_signature(sect: ET.Element) -> dict:
     return {
         "pgSz": attrs(sect.find("w:pgSz", NS), ("w", "h", "orient")),
         "pgMar": attrs(
@@ -195,6 +179,81 @@ def section_signature(document: ET.Element) -> dict:
         ),
         "docGrid": attrs(sect.find("w:docGrid", NS), ("type", "linePitch")),
     }
+
+
+def section_signatures(document: ET.Element) -> list[dict]:
+    return [
+        one_section_signature(sect)
+        for sect in document.findall(".//w:sectPr", NS)
+    ]
+
+
+def signature_is_landscape(signature: dict) -> bool:
+    pg = signature["pgSz"]
+    if pg.get("orient") == "landscape":
+        return True
+    try:
+        return int(pg.get("w") or "0") > int(pg.get("h") or "0")
+    except ValueError:
+        return False
+
+
+def expected_section_signature(target_signature: dict, template_signature: dict) -> dict:
+    expected = {
+        "pgSz": dict(template_signature["pgSz"]),
+        "pgMar": dict(template_signature["pgMar"]),
+        "docGrid": dict(template_signature["docGrid"]),
+    }
+
+    if signature_is_landscape(target_signature):
+        width = template_signature["pgSz"].get("w")
+        height = template_signature["pgSz"].get("h")
+        expected["pgSz"]["w"] = height
+        expected["pgSz"]["h"] = width
+        expected["pgSz"]["orient"] = "landscape"
+    else:
+        # Explicit "portrait" and omitted orientation are semantically equivalent.
+        expected["pgSz"]["orient"] = None
+
+    return expected
+
+
+def section_usable_width_twips(sect: ET.Element, fallback: int) -> int:
+    pg = sect.find("w:pgSz", NS)
+    mar = sect.find("w:pgMar", NS)
+    try:
+        width = int(w_attr(pg, "w") or "0")
+        left = int(w_attr(mar, "left") or "0")
+        right = int(w_attr(mar, "right") or "0")
+    except ValueError:
+        return fallback
+    usable = width - left - right
+    return usable if usable > 0 else fallback
+
+
+def iter_nested_tables(tbl: ET.Element, section_index: int):
+    yield tbl, section_index
+    for tc in tbl.findall("./w:tr/w:tc", NS):
+        for child in list(tc):
+            if child.tag == W + "tbl":
+                yield from iter_nested_tables(child, section_index)
+
+
+def iter_tables_with_sections(document: ET.Element):
+    body = document.find("w:body", NS)
+    if body is None:
+        return
+
+    section_index = 0
+    for child in list(body):
+        if child.tag == W + "tbl":
+            yield from iter_nested_tables(child, section_index)
+            continue
+
+        if child.tag == W + "p":
+            sect = child.find("w:pPr/w:sectPr", NS)
+            if sect is not None:
+                section_index += 1
 
 
 def footer_signature(pkg: Package, document: ET.Element) -> dict:
@@ -354,8 +413,36 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
             actual=actual_east_asia,
         ))
 
-    if section_signature(document) != section_signature(ref_document):
-        issues.append(issue("PAGE-SETUP", "Final/default section page setup differs from template", "page"))
+    target_sections = section_signatures(document)
+    ref_sections = section_signatures(ref_document)
+    if not target_sections or not ref_sections:
+        issues.append(issue("PAGE-SETUP", "Missing section page setup", "page"))
+    else:
+        ref_signature = ref_sections[-1]
+        for section_index, target_signature in enumerate(target_sections, 1):
+            expected_signature = expected_section_signature(
+                target_signature, ref_signature
+            )
+            actual_signature = {
+                "pgSz": dict(target_signature["pgSz"]),
+                "pgMar": dict(target_signature["pgMar"]),
+                "docGrid": dict(target_signature["docGrid"]),
+            }
+            if not signature_is_landscape(target_signature):
+                actual_signature["pgSz"]["orient"] = None
+
+            if actual_signature != expected_signature:
+                issues.append(issue(
+                    "PAGE-SETUP",
+                    f"Section {section_index} page setup differs from the template geometry",
+                    "page",
+                    section=section_index,
+                    orientation=(
+                        "landscape"
+                        if signature_is_landscape(target_signature)
+                        else "portrait"
+                    ),
+                ))
 
     target_even_odd = settings.find("w:evenAndOddHeaders", NS) is not None
     ref_even_odd = ref_settings.find("w:evenAndOddHeaders", NS) is not None
@@ -371,7 +458,7 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
     section_count = len(document.findall(".//w:sectPr", NS))
     if section_count > 1:
         warnings.append(
-            f"Document has {section_count} sections; page/footer checks use the final/default section."
+            f"Document has {section_count} sections; page setup and table widths are section-aware, while footer structure is checked on the final/default section."
         )
 
     body_name = rules["body"]["style"]
@@ -445,10 +532,18 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
                 p, idx, "body", rules
             ))
 
-    max_width = int(rules["table"]["max_width_twips"])
+    fallback_width = int(rules["table"]["fallback_max_width_twips"])
     min_font = int(rules["table"]["font_pt"] * 2)
+    section_nodes = document.findall(".//w:sectPr", NS)
 
-    for t_idx, tbl in enumerate(document.findall(".//w:tbl", NS), 1):
+    for t_idx, (tbl, section_index) in enumerate(
+        iter_tables_with_sections(document), 1
+    ):
+        if section_nodes:
+            sect = section_nodes[min(section_index, len(section_nodes) - 1)]
+            max_width = section_usable_width_twips(sect, fallback_width)
+        else:
+            max_width = fallback_width
         tblpr = tbl.find("w:tblPr", NS)
         tblw = tblpr.find("w:tblW", NS) if tblpr is not None else None
         layout = tblpr.find("w:tblLayout", NS) if tblpr is not None else None

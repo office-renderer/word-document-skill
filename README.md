@@ -1,53 +1,36 @@
 # word-document-skill
 
-这是一个给 ChatGPT、Codex、Claude Code 等 AI Agent 使用的 **Word 排版 Skill**。
-
-它只负责把已有 DOCX 按固定模板进行排版、校验和自动修复，**不负责撰写、改写或补充正文内容**。
+这是一个给 ChatGPT、Codex、Claude Code 等 AI Agent 使用的 **Word 排版 Skill**。它只处理已有 DOCX 的排版、校验和修复，不负责撰写或改写正文。
 
 ## 最简单的用法
-
-AI 进入本仓库后先读 `SKILL.md`，然后运行：
 
 ```bash
 python scripts/run_skill.py 文件.docx
 ```
 
-这个入口会自动完成：
+现在采用 **validate-first**：
 
 ```text
-首次排版
+先校验
   ↓
-快速校验
+已经合格 → 直接结束，不重写 DOCX
+
+发现问题
   ↓
-有可修问题 → 定向修复
+只执行 validation.json 对应的修复组
   ↓
 重新校验
   ↓
-PASS 或达到自动修复上限后停止
+PASS 或达到自动修复上限
 ```
 
-自动修复次数由 `config/rules.json` 控制，AI 不需要自己数轮次。
+这对 200～300 页的大文档尤其重要：已经正确的文档不会为了“再格式化一次”而完整保存一遍。
 
-最终结构检查可用：
+最终结构检查：
 
 ```bash
 python scripts/run_skill.py 文件.docx --strict
 ```
-
-PDF 渲染不属于日常校验，只有明确需要版式检查时才执行。
-
-## 给不同 Agent 的提示词
-
-ChatGPT / Codex / Claude Code 都可以直接使用：
-
-```text
-先读取 SKILL.md。
-只处理这个 DOCX 的 Word 排版，不修改正文内容。
-运行 scripts/run_skill.py。
-如果自动修复停止并仍有 validator 错误码，报告错误码，不要自行设计新的修复流程。
-```
-
-前提是 Agent 能读取仓库、访问目标 DOCX，并能执行 Python。
 
 依赖：
 
@@ -55,12 +38,57 @@ ChatGPT / Codex / Claude Code 都可以直接使用：
 pip install -r requirements.txt
 ```
 
+## 给 AI Agent 的提示词
+
+```text
+先读取 SKILL.md。
+只处理 DOCX 排版，不修改正文内容。
+运行 scripts/run_skill.py。
+保留已有横向/竖向分节。
+如果自动修复停止并仍有 validator 错误码，报告错误码，不要自行设计新的修复流程。
+```
+
+## 三个重要处理原则
+
+### 1. 横向大表按所在 section 处理
+
+程序不再把所有 section 强制改成竖向。已有横向 section 会保留横向，页面尺寸按 A4 横向规范化；页边距等仍按模板执行。
+
+表格宽度不再使用全篇统一的 8845 twips 上限，而是读取表格实际所在 section：
+
+```text
+竖向 section → 使用竖向版心宽度
+横向 section → 使用横向版心宽度
+```
+
+只有超出所在 section 版心的表格才缩小，窄表不强制撑满。
+
+### 2. 大文档先校验再修改
+
+runner 不再一上来执行完整 formatter。先运行只读 validator，只有发现具体问题后才调用对应修复组。
+
+`--strict` 也只在快速校验通过以后执行一次，避免大型文档在每轮修复时重复做结构深检。
+
+### 3. 中西文分 Run 最小化
+
+只处理真正同时包含：
+
+- 中文/东亚文字；
+- ASCII 英文字母或数字；
+
+的普通文本 run。
+
+空格、括号、百分号、句号等中性字符不会单独触发拆分，而是附着到相邻文字片段。纯中文、纯英文/数字 run 不拆，也不会为了“规范化”而额外写入字体槽。
+
+对真正拆分的 mixed run，保留原有直接字体；缺失字体从段落样式和 `docDefaults` 继承。
+
 ## 仓库结构
 
 ```text
 word-document-skill/
 ├─ README.md
 ├─ SKILL.md
+├─ requirements.txt
 ├─ agents/openai.yaml
 ├─ assets/公文排版Word模板.dotx
 ├─ config/rules.json
@@ -71,32 +99,8 @@ word-document-skill/
    └─ validate_docx.py
 ```
 
-职责很简单：
+## Word Online 字体经验
 
-- 模板：定义版式；
-- `rules.json`：保存机器规则；
-- `format_docx.py`：应用格式和定向修复；
-- `validate_docx.py`：只检查；
-- `run_skill.py`：执行完整闭环；
-- `template-spec.md`：只有排查异常或维护 Skill 时才看。
+已验证：单纯把 `仿宋_GB2312` 改成 `FangSong`、修改 `fontTable.xml` 或只设置 `themeFontLang` 都不能替代 mixed-run 拆分。
 
-## 已验证的 Word Online 字体处理
-
-桌面 Word 能在同一个 run 中按字符自动选择中文和西文字体，但 Word Online / OneDrive 曾出现解析不一致。
-
-最终验证有效的处理是：
-
-```text
-中文 run      → 保留模板中文字体，例如 仿宋_GB2312
-英文/数字 run → 保留模板西文字体，例如 Times New Roman
-```
-
-formatter 会拆分普通的中西文混合 run，并显式写入字体槽，同时保留原 run 已经存在的直接字体设置。
-
-单纯把 `仿宋_GB2312` 改成 `FangSong`、修改字体表或只设置 `themeFontLang` 都不能替代这一处理。
-
-## 设计原则
-
-AI 负责调用，Python 负责排版，validator 负责验收，模板负责定义样式。
-
-出现两轮仍无法修复的问题时，应先判断是 formatter 未覆盖，还是 validator 误报，再更新 Skill；不要无限重复同一修复。
+正式方案仍是：**保留模板字体 + mixed run 最小拆分 + 拆分后的 run 显式字体槽**。
