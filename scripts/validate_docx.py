@@ -107,12 +107,6 @@ def style_format_signature(style, by_id, ignored_ppr_tags=()):
     )
 
 
-def paragraph_style_id(p):
-    ppr = p.find("w:pPr", NS)
-    pstyle = ppr.find("w:pStyle", NS) if ppr is not None else None
-    return w_attr(pstyle, "val")
-
-
 def plain_run_text(run):
     allowed = {W + "rPr", W + "t"}
     if any(child.tag not in allowed for child in run):

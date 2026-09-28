@@ -520,6 +520,17 @@ def set_theme_font_language(doc, rules: dict) -> None:
     node.set(qn("w:eastAsia"), rules["language"]["theme_font_east_asia"])
 
 
+def copy_section_doc_grid(target_section, source_section) -> None:
+    target_sectpr = target_section._sectPr
+    source_grid = source_section._sectPr.find(qn("w:docGrid"))
+    target_grid = target_sectpr.find(qn("w:docGrid"))
+
+    if target_grid is not None:
+        target_sectpr.remove(target_grid)
+    if source_grid is not None:
+        target_sectpr.append(deepcopy(source_grid))
+
+
 def copy_page_setup(doc, template_doc, rules: dict) -> None:
     """Apply template page geometry without destroying existing section orientation."""
     source = template_doc.sections[-1]
@@ -549,6 +560,8 @@ def copy_page_setup(doc, template_doc, rules: dict) -> None:
             "header_distance", "footer_distance", "gutter",
         ):
             setattr(section, name, getattr(source, name))
+
+        copy_section_doc_grid(section, source)
 
 
 def replace_story_content(target_story, source_story) -> None:
