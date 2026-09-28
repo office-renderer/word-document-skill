@@ -104,3 +104,18 @@ word-document-skill/
 已验证：单纯把 `仿宋_GB2312` 改成 `FangSong`、修改 `fontTable.xml` 或只设置 `themeFontLang` 都不能替代 mixed-run 拆分。
 
 正式方案仍是：**保留模板字体 + mixed run 最小拆分 + 拆分后的 run 显式字体槽**。
+
+
+## 回归测试
+
+修改 formatter / validator 后运行：
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+当前回归测试固定覆盖三类曾经实际出现的问题：
+
+- 合并单元格遍历不得漏单元格；
+- TOC/标题等样式的 `basedOn` 继承链必须一次同步收敛；
+- 页脚修复后，default/even/first 引用及首页不同设置必须与模板语义一致。

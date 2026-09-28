@@ -84,19 +84,16 @@ def set_indentation_zero(paragraph_or_style) -> None:
         ind.attrib.pop(qn(f"w:{name}"), None)
 
 
-def copy_style_format(target_doc, template_doc, name: str):
+def ensure_target_style(target_doc, source_style):
     try:
-        source = template_doc.styles[name]
+        return target_doc.styles[source_style.name], False
     except KeyError:
-        return None
+        return target_doc.styles.add_style(source_style.name, source_style.type), True
 
-    try:
-        target = target_doc.styles[name]
-    except KeyError:
-        target = target_doc.styles.add_style(name, source.type)
 
-    source_el = source._element
-    target_el = target._element
+def copy_style_properties(target_style, source_style) -> None:
+    source_el = source_style._element
+    target_el = target_style._element
 
     for tag in ("w:pPr", "w:rPr"):
         old = target_el.find(qn(tag))
@@ -106,20 +103,94 @@ def copy_style_format(target_doc, template_doc, name: str):
         if new is not None:
             target_el.append(deepcopy(new))
 
-    if source.base_style is not None:
-        try:
-            target.base_style = target_doc.styles[source.base_style.name]
-        except KeyError:
-            pass
 
-    return target
+def collect_style_sources(template_doc, names) -> dict[str, object]:
+    """Collect configured styles plus their base-style dependencies."""
+    result = {}
+    queue = list(names)
+
+    while queue:
+        name = queue.pop(0)
+        if name in result:
+            continue
+        try:
+            source = template_doc.styles[name]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"template is missing configured/dependent style: {name}"
+            ) from exc
+
+        result[name] = source
+        if source.base_style is not None:
+            queue.append(source.base_style.name)
+
+    return result
+
+
+def copy_style_format(target_doc, template_doc, name: str):
+    """Synchronize one style and ensure its immediate inheritance dependency exists."""
+    try:
+        source = template_doc.styles[name]
+    except KeyError:
+        return None
+
+    sources = collect_style_sources(template_doc, [name])
+    created = set()
+
+    # Pass 1: every dependency exists before any basedOn relationship is assigned.
+    for dep_name, dep_source in sources.items():
+        _target, was_created = ensure_target_style(target_doc, dep_source)
+        if was_created:
+            created.add(dep_name)
+
+    # Pass 2: copy the requested style, plus any dependency that had to be created.
+    for dep_name, dep_source in sources.items():
+        if dep_name == name or dep_name in created:
+            copy_style_properties(target_doc.styles[dep_name], dep_source)
+
+    # Pass 3: assign inheritance only after all referenced parent styles exist.
+    for dep_name, dep_source in sources.items():
+        if dep_name != name and dep_name not in created:
+            continue
+        target = target_doc.styles[dep_name]
+        target.base_style = (
+            target_doc.styles[dep_source.base_style.name]
+            if dep_source.base_style is not None
+            else None
+        )
+
+    return target_doc.styles[name]
 
 
 def sync_template_styles(doc, template, rules: dict) -> None:
-    for name in rules["styles"]["sync_from_template"]:
-        style = copy_style_format(doc, template, name)
-        if style is None:
-            raise RuntimeError(f"template is missing configured style: {name}")
+    """Synchronize configured styles without depending on list order."""
+    configured = list(rules["styles"]["sync_from_template"])
+    sources = collect_style_sources(template, configured)
+    created = set()
+
+    # Pass 1: create every configured style and base-style dependency.
+    for name, source in sources.items():
+        _target, was_created = ensure_target_style(doc, source)
+        if was_created:
+            created.add(name)
+
+    # Pass 2: copy formatting. Existing dependency-only styles are preserved;
+    # configured styles and newly-created dependencies take template formatting.
+    configured_set = set(configured)
+    for name, source in sources.items():
+        if name in configured_set or name in created:
+            copy_style_properties(doc.styles[name], source)
+
+    # Pass 3: restore basedOn links after every possible parent exists.
+    for name, source in sources.items():
+        if name not in configured_set and name not in created:
+            continue
+        target = doc.styles[name]
+        target.base_style = (
+            doc.styles[source.base_style.name]
+            if source.base_style is not None
+            else None
+        )
 
 
 def iter_table_paragraphs(table, seen_cells=None):
@@ -128,7 +199,7 @@ def iter_table_paragraphs(table, seen_cells=None):
 
     for row in table.rows:
         for cell in row.cells:
-            key = id(cell._tc)
+            key = cell._tc
             if key in seen_cells:
                 continue
             seen_cells.add(key)
@@ -485,7 +556,7 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
     seen_cells = set()
     for row in table.rows:
         for cell in row.cells:
-            key = id(cell._tc)
+            key = cell._tc
             if key in seen_cells:
                 continue
             seen_cells.add(key)
@@ -572,17 +643,58 @@ def replace_story_content(target_story, source_story) -> None:
         target_el.append(deepcopy(child))
 
 
+FOOTER_STORY_ATTRS = {
+    "default": "footer",
+    "even": "even_page_footer",
+    "first": "first_page_footer",
+}
+
+
+def footer_reference_types(section) -> set[str]:
+    result = set()
+    for ref in section._sectPr.findall(qn("w:footerReference")):
+        value = ref.get(qn("w:type"))
+        if value:
+            result.add(value)
+    return result
+
+
+def remove_unwanted_footer_references(section, allowed_types: set[str]) -> None:
+    sectpr = section._sectPr
+    for ref in list(sectpr.findall(qn("w:footerReference"))):
+        if ref.get(qn("w:type")) not in allowed_types:
+            sectpr.remove(ref)
+
+
 def copy_footers(doc, template_doc) -> None:
+    """Normalize the final section to the template's footer semantics."""
     doc.settings.odd_and_even_pages_header_footer = (
         template_doc.settings.odd_and_even_pages_header_footer
     )
-    source = template_doc.sections[-1]
 
-    section = doc.sections[-1]
-    section.footer.is_linked_to_previous = False
-    section.even_page_footer.is_linked_to_previous = False
-    replace_story_content(section.footer, source.footer)
-    replace_story_content(section.even_page_footer, source.even_page_footer)
+    source = template_doc.sections[-1]
+    target = doc.sections[-1]
+
+    target.different_first_page_header_footer = (
+        source.different_first_page_header_footer
+    )
+
+    source_types = footer_reference_types(source)
+    remove_unwanted_footer_references(target, source_types)
+
+    for footer_type in ("default", "even", "first"):
+        if footer_type not in source_types:
+            continue
+
+        attr = FOOTER_STORY_ATTRS[footer_type]
+        source_story = getattr(source, attr)
+        target_story = getattr(target, attr)
+        target_story.is_linked_to_previous = False
+        replace_story_content(target_story, source_story)
+
+    # Accessing/unlinking a story can create references; remove anything the
+    # template does not define one final time.
+    remove_unwanted_footer_references(target, source_types)
 
 
 def strip_package_metadata(path: Path, rules: dict) -> None:

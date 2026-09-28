@@ -262,7 +262,11 @@ def footer_signature(pkg: Package, document: ET.Element) -> dict:
             targets[rid] = target
 
     sect = document.findall(".//w:sectPr", NS)[-1]
-    result = {}
+    result = {
+        "__section__": {
+            "different_first_page": sect.find("w:titlePg", NS) is not None,
+        }
+    }
 
     for ref in sect.findall("w:footerReference", NS):
         ftype = w_attr(ref, "type")

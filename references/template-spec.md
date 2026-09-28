@@ -77,3 +77,14 @@ quick validate
 ## OOXML 安全
 
 不要使用 `xml.etree.ElementTree` 对 `document.xml` 或 `styles.xml` 做整体重写。格式修改使用 `python-docx + lxml` 做局部操作。
+
+
+## 自动修复收敛规则
+
+以下三类历史问题已经纳入回归测试：
+
+- 合并单元格去重使用 `cell._tc` 元素本身作为稳定身份，不使用 `id(cell._tc)`。
+- 模板样式采用“先创建全部依赖 → 再复制格式 → 最后建立 basedOn”的三阶段同步，不依赖配置列表顺序。
+- final/default section 的页脚按模板语义归一化：同步奇偶页设置、首页不同设置、default/even/first 引用类型，并删除模板不存在的多余 footerReference。
+
+任何标记为 `auto_fixable` 的错误码，都应在对应 fix_group 执行后具备收敛性；若回归测试发现同一错误码不能收敛，应修 formatter/validator，而不是增加自动重试次数。
