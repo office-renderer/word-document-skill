@@ -47,5 +47,8 @@
       "word/settings.xml",
       "word/_rels/document.xml.rels"
     ]
+  },
+  "language": {
+    "theme_font_east_asia": "zh-CN"
   }
 }
