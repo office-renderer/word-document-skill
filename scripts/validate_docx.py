@@ -215,6 +215,18 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
     ref_document = template.xml("word/document.xml")
     ref_settings = template.xml("word/settings.xml")
 
+    theme_lang = settings.find("w:themeFontLang", NS)
+    expected_east_asia = rules["language"]["theme_font_east_asia"]
+    actual_east_asia = w_attr(theme_lang, "eastAsia")
+    if actual_east_asia != expected_east_asia:
+        issues.append(issue(
+            "SETTINGS-THEME-LANG",
+            f"themeFontLang eastAsia should be {expected_east_asia}, got {actual_east_asia!r}",
+            "language",
+            expected=expected_east_asia,
+            actual=actual_east_asia,
+        ))
+
     if section_signature(document) != section_signature(ref_document):
         issues.append(issue("PAGE-SETUP", "Final/default section page setup differs from template", "page"))
 
