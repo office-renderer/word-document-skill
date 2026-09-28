@@ -23,8 +23,12 @@ from lxml import etree
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RULES = ROOT / "config" / "rules.json"
 TWIP_EMU = 635
+XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
-ALL_GROUPS = {"body", "pagination", "table", "page", "footer", "metadata", "language"}
+ALL_GROUPS = {
+    "body", "pagination", "table", "page", "footer",
+    "metadata", "language", "font",
+}
 PARAGRAPH_ALIGNMENTS = {"center": WD_ALIGN_PARAGRAPH.CENTER}
 VERTICAL_ALIGNMENTS = {"center": WD_CELL_VERTICAL_ALIGNMENT.CENTER}
 
@@ -153,6 +157,138 @@ def usable_width_twips(doc, configured_max: int) -> int:
     return min([configured_max, *widths]) if widths else configured_max
 
 
+def style_font_slots(style, rules: dict) -> tuple[str, str]:
+    """Resolve East Asian and Western fonts from the paragraph style chain."""
+    east = None
+    ascii_font = None
+    hansi_font = None
+    current = style
+    seen = set()
+
+    while current is not None and id(current._element) not in seen:
+        seen.add(id(current._element))
+        rpr = current._element.rPr
+        rfonts = rpr.rFonts if rpr is not None else None
+        if rfonts is not None:
+            if east is None:
+                east = rfonts.get(qn("w:eastAsia"))
+            if ascii_font is None:
+                ascii_font = rfonts.get(qn("w:ascii"))
+            if hansi_font is None:
+                hansi_font = rfonts.get(qn("w:hAnsi"))
+        current = current.base_style
+
+    east = east or rules["fonts"]["east_asia_fallback"]
+    west = (
+        ascii_font
+        or hansi_font
+        or rules["fonts"]["western_default"]
+    )
+    return east, west
+
+
+def text_script_kind(char: str) -> str:
+    return "western" if char.isascii() else "east_asia"
+
+
+def split_script_segments(text: str) -> list[tuple[str, str]]:
+    if not text:
+        return []
+    segments = []
+    kind = text_script_kind(text[0])
+    buf = [text[0]]
+
+    for char in text[1:]:
+        next_kind = text_script_kind(char)
+        if next_kind == kind:
+            buf.append(char)
+        else:
+            segments.append((kind, "".join(buf)))
+            kind = next_kind
+            buf = [char]
+
+    segments.append((kind, "".join(buf)))
+    return segments
+
+
+def plain_run_text(run_el):
+    allowed = {qn("w:rPr"), qn("w:t")}
+    if any(child.tag not in allowed for child in run_el):
+        return None
+    texts = run_el.findall(qn("w:t"))
+    if not texts:
+        return None
+    return "".join(t.text or "" for t in texts)
+
+
+def set_explicit_run_fonts(run_el, east_font: str, west_font: str) -> None:
+    rpr = run_el.get_or_add_rPr()
+    rfonts = rpr.get_or_add_rFonts()
+    rfonts.set(qn("w:eastAsia"), east_font)
+    rfonts.set(qn("w:ascii"), west_font)
+    rfonts.set(qn("w:hAnsi"), west_font)
+    rfonts.set(qn("w:cs"), west_font)
+
+
+def replace_run_with_segments(run_el, segments, east_font: str, west_font: str) -> None:
+    parent = run_el.getparent()
+
+    for _kind, text in segments:
+        new_run = deepcopy(run_el)
+        for child in list(new_run):
+            if child.tag != qn("w:rPr"):
+                new_run.remove(child)
+
+        set_explicit_run_fonts(new_run, east_font, west_font)
+
+        t = OxmlElement("w:t")
+        if text[:1].isspace() or text[-1:].isspace():
+            t.set(XML_SPACE, "preserve")
+        t.text = text
+        new_run.append(t)
+        run_el.addprevious(new_run)
+
+    parent.remove(run_el)
+
+
+def normalize_paragraph_runs(paragraph, rules: dict) -> None:
+    """Split plain text runs by script and make both font slots explicit."""
+    try:
+        style = paragraph.style
+    except (KeyError, ValueError):
+        style = None
+
+    east_font, west_font = style_font_slots(style, rules) if style is not None else (
+        rules["fonts"]["east_asia_fallback"],
+        rules["fonts"]["western_default"],
+    )
+
+    for run in list(paragraph.runs):
+        run_el = run._r
+        text = plain_run_text(run_el)
+        if text is None or not text:
+            continue
+
+        segments = split_script_segments(text)
+        if not segments:
+            continue
+
+        if rules["fonts"]["split_mixed_runs"] and len(segments) > 1:
+            replace_run_with_segments(run_el, segments, east_font, west_font)
+        else:
+            set_explicit_run_fonts(run_el, east_font, west_font)
+
+
+def normalize_document_runs(doc, rules: dict) -> None:
+    seen = set()
+    for paragraph in iter_all_paragraphs(doc):
+        key = id(paragraph._p)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalize_paragraph_runs(paragraph, rules)
+
+
 TBLW_LATER_TAGS = tuple(
     qn(tag) for tag in (
         "w:jc", "w:tblCellSpacing", "w:tblInd", "w:tblBorders", "w:shd",
@@ -247,7 +383,6 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
 
 
 def set_theme_font_language(doc, rules: dict) -> None:
-    """Keep Word's East Asian theme language on Simplified Chinese."""
     settings = doc.settings._element
     node = settings.find(qn("w:themeFontLang"))
     if node is None:
@@ -426,15 +561,15 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
     if "footer" in groups:
         copy_footers(doc, template)
 
+    # Run splitting comes last so it sees the final paragraph styles and copied footers.
+    if "font" in groups:
+        normalize_document_runs(doc, rules)
+
     dst.parent.mkdir(parents=True, exist_ok=True)
     doc.save(dst)
 
-    if "metadata" in groups or not groups:
-        strip_package_metadata(dst, rules)
-    else:
-        # python-docx may create core properties on save; final files must always be clean.
-        strip_package_metadata(dst, rules)
-
+    # Saving through python-docx may create core properties; final outputs are always cleaned.
+    strip_package_metadata(dst, rules)
     quick_safety_check(dst, rules)
 
 

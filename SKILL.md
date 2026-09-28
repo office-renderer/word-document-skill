@@ -32,12 +32,27 @@ This skill has one closed loop. Do not manually remember or replay formatting ru
 - `assets/公文排版Word模板.dotx`: template-defined formatting.
 - `config/rules.json`: machine formatting rules shared by formatter and validator.
 - `scripts/format_docx.py`: the only normal entry point for applying and repairing Word formatting.
-- `scripts/validate_docx.py`: read-only validation; it never modifies the document. Validation follows rendered/semantic behavior rather than requiring irrelevant hidden OOXML nodes to match.
+- `scripts/validate_docx.py`: read-only validation; it never modifies the document.
 - `references/template-spec.md`: diagnostic reference only; do not read it during normal execution.
+
+## Word Online font compatibility rule
+
+Do not rely on a single Word run to auto-select East Asian and Western font slots.
+
+For plain text runs, the formatter MUST split East Asian text and ASCII text into separate runs while preserving the exact characters and all other run formatting. Each resulting run must explicitly contain:
+
+- the paragraph style's East Asian font in `w:rFonts/@w:eastAsia`;
+- the paragraph style's Western font, normally Times New Roman, in `w:ascii`, `w:hAnsi`, and `w:cs`.
+
+Keep the template's Chinese font names, including `仿宋_GB2312`; do not replace them with `FangSong` merely to improve Word Online display.
+
+Keep `w:themeFontLang/@w:eastAsia = zh-CN`.
+
+This rule was added because Word desktop rendered mixed-script runs correctly, while Word Online could select the run's Western font from leading ASCII digits/letters and then fall back inconsistently for the Chinese characters. Explicit script-separated runs resolved the observed display problem.
 
 ## Scope boundary
 
-This skill may apply styles, indentation, pagination, table formatting, page setup, footers/page numbers, and metadata cleanup. It must not draft, rewrite, summarize, expand, research, or fact-check substantive content.
+This skill may apply styles, indentation, pagination, table formatting, page setup, footers/page numbers, font-run normalization, and metadata cleanup. It must not draft, rewrite, summarize, expand, research, or fact-check substantive content.
 
 ## Safeguards
 
@@ -46,3 +61,4 @@ This skill may apply styles, indentation, pagination, table formatting, page set
 - Do not fully reserialize `document.xml` or `styles.xml` with `xml.etree.ElementTree`.
 - Do not put generator/tool/account metadata into the final Word file.
 - Do not use PDF rendering as part of normal validation.
+- Do not split or rewrite runs that contain fields, drawings, tabs, breaks, hyperlinks, or other non-plain-text OOXML; preserve those structures.

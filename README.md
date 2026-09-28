@@ -288,3 +288,30 @@ Validator 负责检查
 如果 validator 连续两轮仍然发现同一问题，说明当前程序还没有覆盖这种情况。
 
 此时应该分析问题并更新 Skill 的规则或脚本，而不是让 AI 无限重复尝试。
+
+
+## Word Online 字体兼容
+
+本仓库不会为了兼容浏览器版 Word 把 `仿宋_GB2312` 替换成 `FangSong`。
+
+实际对照测试表明，问题来自同一个 Word run 内同时包含中文与英文/数字时，Word Online 可能与桌面 Word 采用不同的字体槽解析方式。
+
+因此 formatter 会自动：
+
+```text
+中文 run      → 当前段落样式的东亚字体
+英文/数字 run → 当前段落样式的西文字体（通常 Times New Roman）
+```
+
+例如：
+
+```text
+原始一个 run：
+2021年以来，北京北矿……
+
+格式化后：
+[2021]        Times New Roman
+[年以来，北京北矿……]  仿宋_GB2312
+```
+
+文字内容不发生改变，只调整 Word 内部 run 边界和字体槽。validator 会检查混合 run 和显式字体设置，并通过 `font` 修复组交回 formatter 自动修复。

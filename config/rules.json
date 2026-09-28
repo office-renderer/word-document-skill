@@ -26,6 +26,11 @@
     "vertical_alignment": "center",
     "zero_indentation": true
   },
+  "fonts": {
+    "split_mixed_runs": true,
+    "western_default": "Times New Roman",
+    "east_asia_fallback": "仿宋_GB2312"
+  },
   "metadata": {
     "remove_parts": [
       "docProps/core.xml",

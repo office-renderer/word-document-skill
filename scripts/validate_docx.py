@@ -84,6 +84,137 @@ def attrs(el: ET.Element | None, names):
     return {name: w_attr(el, name) for name in names}
 
 
+def default_paragraph_style_id(styles: ET.Element) -> str | None:
+    for style in styles.findall("w:style", NS):
+        if (
+            w_attr(style, "type") == "paragraph"
+            and (w_attr(style, "default") or "").lower() in {"1", "true", "on"}
+        ):
+            return w_attr(style, "styleId")
+    return None
+
+
+def style_font_slots(style_id, styles, by_id, rules):
+    east = None
+    ascii_font = None
+    hansi_font = None
+    seen = set()
+    sid = style_id or default_paragraph_style_id(styles)
+
+    while sid and sid in by_id and sid not in seen:
+        seen.add(sid)
+        style = by_id[sid]
+        rfonts = style.find("w:rPr/w:rFonts", NS)
+        if rfonts is not None:
+            if east is None:
+                east = w_attr(rfonts, "eastAsia")
+            if ascii_font is None:
+                ascii_font = w_attr(rfonts, "ascii")
+            if hansi_font is None:
+                hansi_font = w_attr(rfonts, "hAnsi")
+        sid = w_attr(style.find("w:basedOn", NS), "val")
+
+    defaults = styles.find("w:docDefaults/w:rPrDefault/w:rPr/w:rFonts", NS)
+    if defaults is not None:
+        east = east or w_attr(defaults, "eastAsia")
+        ascii_font = ascii_font or w_attr(defaults, "ascii")
+        hansi_font = hansi_font or w_attr(defaults, "hAnsi")
+
+    return (
+        east or rules["fonts"]["east_asia_fallback"],
+        ascii_font or hansi_font or rules["fonts"]["western_default"],
+    )
+
+
+def paragraph_style_id(p):
+    ppr = p.find("w:pPr", NS)
+    pstyle = ppr.find("w:pStyle", NS) if ppr is not None else None
+    return w_attr(pstyle, "val")
+
+
+def plain_run_text(run):
+    allowed = {W + "rPr", W + "t"}
+    if any(child.tag not in allowed for child in run):
+        return None
+    texts = run.findall("w:t", NS)
+    if not texts:
+        return None
+    return "".join(t.text or "" for t in texts)
+
+
+def script_flags(text: str) -> tuple[bool, bool]:
+    east = any((not c.isascii()) for c in text if not c.isspace())
+    west = any(c.isascii() for c in text if not c.isspace())
+    return east, west
+
+
+def font_issues_for_paragraph(
+    p,
+    paragraph_index,
+    location,
+    styles,
+    by_id,
+    rules,
+):
+    result = []
+    style_id = paragraph_style_id(p)
+    east_font, west_font = style_font_slots(style_id, styles, by_id, rules)
+
+    for run_index, run in enumerate(p.findall("w:r", NS), 1):
+        text = plain_run_text(run)
+        if text is None or not text.strip():
+            continue
+
+        has_east, has_west = script_flags(text)
+
+        if rules["fonts"]["split_mixed_runs"] and has_east and has_west:
+            result.append(issue(
+                "FONT-MIXED-RUN",
+                f"{location} paragraph {paragraph_index} run {run_index} mixes East Asian and ASCII text",
+                "font",
+                location=location,
+                paragraph=paragraph_index,
+                run=run_index,
+                text=text[:80],
+            ))
+            continue
+
+        rpr = run.find("w:rPr", NS)
+        rfonts = rpr.find("w:rFonts", NS) if rpr is not None else None
+
+        if has_east:
+            actual = w_attr(rfonts, "eastAsia")
+            if actual != east_font:
+                result.append(issue(
+                    "FONT-EAST-ASIA",
+                    f"{location} paragraph {paragraph_index} run {run_index} should use East Asian font {east_font!r}",
+                    "font",
+                    location=location,
+                    paragraph=paragraph_index,
+                    run=run_index,
+                    expected=east_font,
+                    actual=actual,
+                ))
+
+        if has_west:
+            actual_ascii = w_attr(rfonts, "ascii")
+            actual_hansi = w_attr(rfonts, "hAnsi")
+            if actual_ascii != west_font or actual_hansi != west_font:
+                result.append(issue(
+                    "FONT-WESTERN",
+                    f"{location} paragraph {paragraph_index} run {run_index} should use Western font {west_font!r}",
+                    "font",
+                    location=location,
+                    paragraph=paragraph_index,
+                    run=run_index,
+                    expected=west_font,
+                    ascii=actual_ascii,
+                    hAnsi=actual_hansi,
+                ))
+
+    return result
+
+
 def section_signature(document: ET.Element) -> dict:
     sections = document.findall(".//w:sectPr", NS)
     if not sections:
@@ -100,7 +231,6 @@ def section_signature(document: ET.Element) -> dict:
 
 
 def footer_signature(pkg: Package, document: ET.Element) -> dict:
-    """Return only footer semantics that affect the rendered page-number layout."""
     rels = pkg.xml("word/_rels/document.xml.rels")
     targets = {}
     for rel in rels:
@@ -163,7 +293,6 @@ def text_of(p: ET.Element) -> str:
 
 
 def is_vmerge_continuation(tc: ET.Element) -> bool:
-    """True for a vertical-merge continuation cell that Word does not render independently."""
     tcpr = tc.find("w:tcPr", NS)
     vmerge = tcpr.find("w:vMerge", NS) if tcpr is not None else None
     if vmerge is None:
@@ -281,34 +410,42 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
                 issues.append(issue("FMT-PAGINATION-PARA", f"Paragraph {idx} enables {tag}", "pagination", paragraph=idx, property=tag))
 
     body = document.find("w:body", NS)
-    if body is not None and body_id:
-        min_chars = int(rules["body"]["auto_map_min_chars"])
-        auto_from = set(rules["body"]["auto_map_from_styles"])
-        for idx, p in enumerate(body.findall("w:p", NS), 1):
-            text = text_of(p)
-            if len(text) < min_chars:
-                continue
-            ppr = p.find("w:pPr", NS)
-            jc = ppr.find("w:jc", NS) if ppr is not None else None
-            if w_attr(jc, "val") in {"center", "right"}:
-                continue
-            pstyle = ppr.find("w:pStyle", NS) if ppr is not None else None
-            sid = w_attr(pstyle, "val")
-            style_name = (
-                w_attr(by_id[sid].find("w:name", NS), "val")
-                if sid in by_id
-                else "Normal" if sid is None else sid
-            )
-            if style_name in auto_from:
-                issues.append(issue("FMT-BODY-USAGE", f"Paragraph {idx} uses {style_name!r} instead of {body_name!r}", "body", paragraph=idx))
+    if body is not None:
+        direct_paragraphs = body.findall("w:p", NS)
 
-            if sid == body_id and ppr is not None:
-                direct = ppr.find("w:ind", NS)
-                if direct is not None and any(
-                    w_attr(direct, key) is not None
-                    for key in ("firstLine", "firstLineChars", "hanging", "hangingChars")
-                ):
-                    issues.append(issue("FMT-BODY-DIRECT-INDENT", f"Paragraph {idx} overrides body indentation", "body", paragraph=idx))
+        if body_id:
+            min_chars = int(rules["body"]["auto_map_min_chars"])
+            auto_from = set(rules["body"]["auto_map_from_styles"])
+            for idx, p in enumerate(direct_paragraphs, 1):
+                text = text_of(p)
+                if len(text) < min_chars:
+                    continue
+                ppr = p.find("w:pPr", NS)
+                jc = ppr.find("w:jc", NS) if ppr is not None else None
+                if w_attr(jc, "val") in {"center", "right"}:
+                    continue
+                pstyle = ppr.find("w:pStyle", NS) if ppr is not None else None
+                sid = w_attr(pstyle, "val")
+                style_name = (
+                    w_attr(by_id[sid].find("w:name", NS), "val")
+                    if sid in by_id
+                    else "Normal" if sid is None else sid
+                )
+                if style_name in auto_from:
+                    issues.append(issue("FMT-BODY-USAGE", f"Paragraph {idx} uses {style_name!r} instead of {body_name!r}", "body", paragraph=idx))
+
+                if sid == body_id and ppr is not None:
+                    direct = ppr.find("w:ind", NS)
+                    if direct is not None and any(
+                        w_attr(direct, key) is not None
+                        for key in ("firstLine", "firstLineChars", "hanging", "hangingChars")
+                    ):
+                        issues.append(issue("FMT-BODY-DIRECT-INDENT", f"Paragraph {idx} overrides body indentation", "body", paragraph=idx))
+
+        for idx, p in enumerate(direct_paragraphs, 1):
+            issues.extend(font_issues_for_paragraph(
+                p, idx, "body", styles, by_id, rules
+            ))
 
     max_width = int(rules["table"]["max_width_twips"])
     min_font = int(rules["table"]["font_pt"] * 2)
@@ -346,8 +483,6 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
                 issues.append(issue("TBL-GRID-WIDTH", f"Table {t_idx} grid width is {total}", "table", table=t_idx, width=total))
 
         for c_idx, tc in enumerate(tbl.findall(".//w:tc", NS), 1):
-            # A vMerge continuation is not an independently rendered cell. Its hidden
-            # paragraph formatting must not fail the visible-table validation.
             if is_vmerge_continuation(tc):
                 continue
 
@@ -381,8 +516,18 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
                     ):
                         issues.append(issue("TBL-PARA-INDENT", f"Table {t_idx} cell {c_idx} paragraph {p_idx} has indentation", "table", table=t_idx, cell=c_idx, paragraph=p_idx))
 
-                for r_idx, run in enumerate(p.findall(".//w:r", NS), 1):
-                    if not "".join((t.text or "") for t in run.findall(".//w:t", NS)):
+                issues.extend(font_issues_for_paragraph(
+                    p,
+                    p_idx,
+                    f"table {t_idx} cell {c_idx}",
+                    styles,
+                    by_id,
+                    rules,
+                ))
+
+                for r_idx, run in enumerate(p.findall("w:r", NS), 1):
+                    text = plain_run_text(run)
+                    if text is None or not text:
                         continue
                     rpr = run.find("w:rPr", NS)
                     sz = w_attr(rpr.find("w:sz", NS), "val") if rpr is not None else None
