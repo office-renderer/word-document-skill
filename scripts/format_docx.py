@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RULES = ROOT / "config" / "rules.json"
 TWIP_EMU = 635
 
-ALL_GROUPS = {"body", "pagination", "table", "page", "footer", "metadata"}
+ALL_GROUPS = {"body", "pagination", "table", "page", "footer", "metadata", "language"}
 PARAGRAPH_ALIGNMENTS = {"center": WD_ALIGN_PARAGRAPH.CENTER}
 VERTICAL_ALIGNMENTS = {"center": WD_CELL_VERTICAL_ALIGNMENT.CENTER}
 
@@ -246,6 +246,16 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
                 normalize_table(nested, table_style, rules, max_width)
 
 
+def set_theme_font_language(doc, rules: dict) -> None:
+    """Keep Word's East Asian theme language on Simplified Chinese."""
+    settings = doc.settings._element
+    node = settings.find(qn("w:themeFontLang"))
+    if node is None:
+        node = OxmlElement("w:themeFontLang")
+        settings.append(node)
+    node.set(qn("w:eastAsia"), rules["language"]["theme_font_east_asia"])
+
+
 def copy_page_setup(doc, template_doc) -> None:
     source = template_doc.sections[-1]
     attrs = (
@@ -406,6 +416,9 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
         max_width = usable_width_twips(doc, int(rules["table"]["max_width_twips"]))
         for table in doc.tables:
             normalize_table(table, table_style, rules, max_width)
+
+    if "language" in groups:
+        set_theme_font_language(doc, rules)
 
     if "page" in groups:
         copy_page_setup(doc, template)
