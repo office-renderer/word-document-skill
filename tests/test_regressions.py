@@ -58,6 +58,39 @@ class WordSkillRegressionTests(unittest.TestCase):
                 f"basedOn mismatch after sync for style {name!r}",
             )
 
+        # Save/reopen through the same XML path used by the validator, then
+        # compare the exact style signature that drives STY-MISMATCH.
+        with tempfile.TemporaryDirectory() as tmp:
+            target_path = Path(tmp) / "styles.docx"
+            target.save(target_path)
+
+            target_pkg = validate_docx.Package(target_path)
+            template_pkg = validate_docx.Package(self.template_path)
+            try:
+                target_styles = target_pkg.xml("word/styles.xml")
+                template_styles = template_pkg.xml("word/styles.xml")
+                target_by_id, target_by_name = validate_docx.style_catalog(target_styles)
+                template_by_id, template_by_name = validate_docx.style_catalog(template_styles)
+
+                ignored = [
+                    validate_docx.PAGINATION_OOXML[item]
+                    for item in self.rules["pagination"]["disable"]
+                ]
+
+                for name in self.rules["styles"]["sync_from_template"]:
+                    self.assertEqual(
+                        validate_docx.style_format_signature(
+                            target_by_name[name], target_by_id, ignored
+                        ),
+                        validate_docx.style_format_signature(
+                            template_by_name[name], template_by_id, ignored
+                        ),
+                        f"validator style signature mismatch after sync for {name!r}",
+                    )
+            finally:
+                target_pkg.close()
+                template_pkg.close()
+
     def test_footer_fix_matches_template_semantics_and_removes_extra_first_footer(self):
         template = Document(self.template_path)
         target = Document()
