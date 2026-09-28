@@ -39,6 +39,7 @@ Use `--strict` only for final structural QA or troubleshooting. PDF rendering is
 ## Required safeguards
 
 - Preserve substantive content.
+- The first main-title paragraph must be followed by exactly one real empty paragraph; repeated runs must not add more.
 - Preserve existing portrait/landscape section orientation; apply template page geometry within each orientation.
 - Size tables against the usable width of the section that actually contains them.
 - Split only true mixed Chinese/East-Asian + ASCII-alphanumeric plain-text runs; spaces and punctuation alone must not cause extra runs.

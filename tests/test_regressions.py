@@ -30,6 +30,47 @@ class WordSkillRegressionTests(unittest.TestCase):
         cls.rules = load_rules()
         cls.template_path = ROOT / cls.rules["template_path"]
 
+    def test_main_title_spacing_is_exactly_one_real_empty_paragraph_and_idempotent(self):
+        template = Document(self.template_path)
+        target = Document()
+        format_docx.sync_template_styles(target, template, self.rules)
+
+        title_style = self.rules["title_spacing"]["main_title_styles"][0]
+        title = target.add_paragraph("测试主标题")
+        title.style = target.styles[title_style]
+        target.add_paragraph("")
+        target.add_paragraph("")
+        target.add_paragraph("一、总体情况")
+
+        format_docx.normalize_main_title_spacing(target, template, self.rules)
+        format_docx.normalize_main_title_spacing(target, template, self.rules)
+
+        sibling = title._p.getnext()
+        count = 0
+        while sibling is not None and format_docx.is_plain_empty_paragraph_element(sibling):
+            count += 1
+            sibling = sibling.getnext()
+
+        self.assertEqual(count, 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target_path = Path(tmp) / "title-spacing.docx"
+            target.save(target_path)
+
+            pkg = validate_docx.Package(target_path)
+            try:
+                document = pkg.xml("word/document.xml")
+                styles = pkg.xml("word/styles.xml")
+                _by_id, by_name = validate_docx.style_catalog(styles)
+                self.assertEqual(
+                    validate_docx.title_spacing_issues(
+                        document, by_name, self.rules
+                    ),
+                    [],
+                )
+            finally:
+                pkg.close()
+
     def test_merged_cells_are_visited_once_without_skipping_distinct_cells(self):
         doc = Document()
         table = doc.add_table(rows=2, cols=2)

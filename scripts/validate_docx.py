@@ -327,6 +327,77 @@ def is_vmerge_continuation(tc: ET.Element) -> bool:
     return value in {None, "", "continue"}
 
 
+def is_plain_empty_paragraph(p: ET.Element) -> bool:
+    if p.tag != W + "p":
+        return False
+
+    for child in list(p):
+        if child.tag == W + "pPr":
+            if child.find("w:sectPr", NS) is not None:
+                return False
+            continue
+
+        if child.tag != W + "r":
+            return False
+
+        for run_child in list(child):
+            if run_child.tag == W + "rPr":
+                continue
+            if run_child.tag == W + "t" and not (run_child.text or "").strip():
+                continue
+            return False
+
+    return True
+
+
+def title_spacing_issues(document, by_name, rules):
+    title_ids = {
+        w_attr(by_name[name], "styleId")
+        for name in rules["title_spacing"]["main_title_styles"]
+        if name in by_name
+    }
+    if not title_ids:
+        return []
+
+    body = document.find("w:body", NS)
+    if body is None:
+        return []
+
+    children = list(body)
+    title_index = None
+
+    for index, child in enumerate(children):
+        if child.tag != W + "p":
+            continue
+        ppr = child.find("w:pPr", NS)
+        pstyle = ppr.find("w:pStyle", NS) if ppr is not None else None
+        if w_attr(pstyle, "val") in title_ids:
+            title_index = index
+            break
+
+    if title_index is None:
+        return []
+
+    count = 0
+    for child in children[title_index + 1:]:
+        if is_plain_empty_paragraph(child):
+            count += 1
+            continue
+        break
+
+    required = int(rules["title_spacing"]["required_empty_paragraphs"])
+    if count == required:
+        return []
+
+    return [issue(
+        "TITLE-SPACER-COUNT",
+        f"Main title should be followed by exactly {required} empty paragraph(s), got {count}",
+        "title_spacing",
+        expected=required,
+        actual=count,
+    )]
+
+
 def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[dict], list[str]]:
     issues = []
     warnings = []
@@ -460,6 +531,8 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
         warnings.append(
             f"Document has {section_count} sections; page setup and table widths are section-aware, while footer structure is checked on the final/default section."
         )
+
+    issues.extend(title_spacing_issues(document, by_name, rules))
 
     body_name = rules["body"]["style"]
     body_style = by_name.get(body_name)

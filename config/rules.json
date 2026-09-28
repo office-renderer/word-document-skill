@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "template_path": "assets/公文排版Word模板.dotx",
   "workflow": {
     "max_auto_repairs": 2,
@@ -83,5 +83,13 @@
   },
   "language": {
     "theme_font_east_asia": "zh-CN"
+  },
+  "title_spacing": {
+    "main_title_styles": [
+      "heading 1",
+      "公文标题"
+    ],
+    "required_empty_paragraphs": 1,
+    "fallback_style": "正文（默认）"
   }
 }

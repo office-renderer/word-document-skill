@@ -28,7 +28,7 @@ TWIP_EMU = 635
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 ALL_GROUPS = {
-    "styles", "body", "pagination", "table", "page", "footer",
+    "styles", "body", "title_spacing", "pagination", "table", "page", "footer",
     "metadata", "language", "font",
 }
 PARAGRAPH_ALIGNMENTS = {"center": WD_ALIGN_PARAGRAPH.CENTER}
@@ -191,6 +191,96 @@ def sync_template_styles(doc, template, rules: dict) -> None:
             if source.base_style is not None
             else None
         )
+
+
+def find_main_title_paragraph(doc, rules: dict):
+    title_styles = set(rules["title_spacing"]["main_title_styles"])
+    for paragraph in doc.paragraphs:
+        style = paragraph.style
+        if style is not None and style.name in title_styles:
+            return paragraph
+    return None
+
+
+def is_plain_empty_paragraph_element(p) -> bool:
+    """True only for a real empty paragraph without structural Word objects."""
+    if p.tag != qn("w:p"):
+        return False
+
+    for child in p:
+        if child.tag == qn("w:pPr"):
+            if child.find(qn("w:sectPr")) is not None:
+                return False
+            continue
+
+        if child.tag != qn("w:r"):
+            return False
+
+        for run_child in child:
+            if run_child.tag == qn("w:rPr"):
+                continue
+            if run_child.tag == qn("w:t") and not (run_child.text or "").strip():
+                continue
+            return False
+
+    return True
+
+
+def template_next_style_name(template_doc, title_style_name: str, fallback: str) -> str:
+    try:
+        source = template_doc.styles[title_style_name]
+    except KeyError:
+        return fallback
+
+    next_node = source._element.find(qn("w:next"))
+    next_id = next_node.get(qn("w:val")) if next_node is not None else None
+    if next_id:
+        for style in template_doc.styles:
+            if style.style_id == next_id:
+                return style.name
+
+    return fallback
+
+
+def normalize_main_title_spacing(doc, template_doc, rules: dict) -> None:
+    """Enforce one real empty paragraph immediately after the main title."""
+    title = find_main_title_paragraph(doc, rules)
+    if title is None:
+        return
+
+    title_el = title._p
+    sibling = title_el.getnext()
+    empty_nodes = []
+
+    while sibling is not None and is_plain_empty_paragraph_element(sibling):
+        empty_nodes.append(sibling)
+        sibling = sibling.getnext()
+
+    for node in empty_nodes:
+        node.getparent().remove(node)
+
+    title_style_name = title.style.name if title.style is not None else ""
+    fallback = rules["title_spacing"]["fallback_style"]
+    spacer_style_name = template_next_style_name(
+        template_doc, title_style_name, fallback
+    )
+
+    try:
+        spacer_style = doc.styles[spacer_style_name]
+    except KeyError:
+        spacer_style = copy_style_format(doc, template_doc, spacer_style_name)
+        if spacer_style is None:
+            raise RuntimeError(
+                f"template is missing title spacer style: {spacer_style_name}"
+            )
+
+    blank = OxmlElement("w:p")
+    ppr = OxmlElement("w:pPr")
+    pstyle = OxmlElement("w:pStyle")
+    pstyle.set(qn("w:val"), spacer_style.style_id)
+    ppr.append(pstyle)
+    blank.append(ppr)
+    title_el.addnext(blank)
 
 
 def iter_table_paragraphs(table, seen_cells=None):
@@ -808,6 +898,9 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
                 paragraph.paragraph_format.left_indent = None
                 paragraph.paragraph_format.right_indent = None
                 paragraph.paragraph_format.first_line_indent = None
+
+    if "title_spacing" in groups:
+        normalize_main_title_spacing(doc, template, rules)
 
     if "pagination" in groups:
         for style in doc.styles:
