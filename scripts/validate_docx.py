@@ -218,17 +218,19 @@ def expected_section_signature(target_signature: dict, template_signature: dict)
     return expected
 
 
-def section_usable_width_twips(sect: ET.Element, fallback: int) -> int:
-    pg = sect.find("w:pgSz", NS)
-    mar = sect.find("w:pgMar", NS)
+def signature_usable_width_twips(signature: dict, fallback: int) -> int:
     try:
-        width = int(w_attr(pg, "w") or "0")
-        left = int(w_attr(mar, "left") or "0")
-        right = int(w_attr(mar, "right") or "0")
+        width = int(signature["pgSz"].get("w") or "0")
+        left = int(signature["pgMar"].get("left") or "0")
+        right = int(signature["pgMar"].get("right") or "0")
     except ValueError:
         return fallback
     usable = width - left - right
     return usable if usable > 0 else fallback
+
+
+def section_usable_width_twips(sect: ET.Element, fallback: int) -> int:
+    return signature_usable_width_twips(one_section_signature(sect), fallback)
 
 
 def iter_nested_tables(tbl: ET.Element, section_index: int):
@@ -539,7 +541,16 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
     for t_idx, (tbl, section_index) in enumerate(
         iter_tables_with_sections(document), 1
     ):
-        if section_nodes:
+        if section_nodes and ref_sections:
+            sect = section_nodes[min(section_index, len(section_nodes) - 1)]
+            target_signature = one_section_signature(sect)
+            expected_signature = expected_section_signature(
+                target_signature, ref_sections[-1]
+            )
+            max_width = signature_usable_width_twips(
+                expected_signature, fallback_width
+            )
+        elif section_nodes:
             sect = section_nodes[min(section_index, len(section_nodes) - 1)]
             max_width = section_usable_width_twips(sect, fallback_width)
         else:

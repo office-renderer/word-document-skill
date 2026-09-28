@@ -122,12 +122,20 @@ def sync_template_styles(doc, template, rules: dict) -> None:
             raise RuntimeError(f"template is missing configured style: {name}")
 
 
-def iter_table_paragraphs(table):
+def iter_table_paragraphs(table, seen_cells=None):
+    if seen_cells is None:
+        seen_cells = set()
+
     for row in table.rows:
         for cell in row.cells:
+            key = id(cell._tc)
+            if key in seen_cells:
+                continue
+            seen_cells.add(key)
+
             yield from cell.paragraphs
             for nested in cell.tables:
-                yield from iter_table_paragraphs(nested)
+                yield from iter_table_paragraphs(nested, seen_cells)
 
 
 def iter_all_paragraphs(doc):
@@ -390,17 +398,13 @@ def normalize_paragraph_runs(paragraph, doc, rules: dict) -> None:
 
 
 def normalize_document_runs(doc, rules: dict) -> None:
-    seen = set()
-    paragraphs = list(doc.paragraphs)
-    for table in doc.tables:
-        paragraphs.extend(iter_table_paragraphs(table))
-
-    for paragraph in paragraphs:
-        key = id(paragraph._p)
-        if key in seen:
-            continue
-        seen.add(key)
+    for paragraph in doc.paragraphs:
         normalize_paragraph_runs(paragraph, doc, rules)
+
+    seen_cells = set()
+    for table in doc.tables:
+        for paragraph in iter_table_paragraphs(table, seen_cells):
+            normalize_paragraph_runs(paragraph, doc, rules)
 
 
 TBLW_LATER_TAGS = tuple(
@@ -617,7 +621,7 @@ def strip_package_metadata(path: Path, rules: dict) -> None:
             temp_path.unlink()
 
 
-def quick_safety_check(path: Path, rules: dict) -> None:
+def quick_safety_check(path: Path, rules: dict, reopen: bool = True) -> None:
     with zipfile.ZipFile(path, "r") as zf:
         names = set(zf.namelist())
         for name in rules["validation"]["quick_required_parts"]:
@@ -629,7 +633,8 @@ def quick_safety_check(path: Path, rules: dict) -> None:
             if name in names:
                 raise RuntimeError(f"metadata part remains: {name}")
 
-    Document(path)
+    if reopen:
+        Document(path)
 
 
 def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None:
@@ -637,7 +642,7 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         strip_package_metadata(dst, rules)
-        quick_safety_check(dst, rules)
+        quick_safety_check(dst, rules, reopen=False)
         return
 
     doc = Document(src)
@@ -686,6 +691,9 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
         for paragraph in iter_all_paragraphs(doc):
             clear_direct_pagination_overrides(paragraph.paragraph_format, rules)
 
+    if "page" in groups:
+        copy_page_setup(doc, template, rules)
+
     if "table" in groups:
         if body_style is None:
             try:
@@ -715,9 +723,6 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
 
     if "language" in groups:
         set_theme_font_language(doc, rules)
-
-    if "page" in groups:
-        copy_page_setup(doc, template, rules)
 
     if "footer" in groups:
         copy_footers(doc, template)
