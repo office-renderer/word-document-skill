@@ -26,7 +26,7 @@ TWIP_EMU = 635
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 ALL_GROUPS = {
-    "body", "pagination", "table", "page", "footer",
+    "styles", "body", "pagination", "table", "page", "footer",
     "metadata", "language", "font",
 }
 PARAGRAPH_ALIGNMENTS = {"center": WD_ALIGN_PARAGRAPH.CENTER}
@@ -113,6 +113,13 @@ def copy_style_format(target_doc, template_doc, name: str):
     return target
 
 
+def sync_template_styles(doc, template, rules: dict) -> None:
+    for name in rules["styles"]["sync_from_template"]:
+        style = copy_style_format(doc, template, name)
+        if style is None:
+            raise RuntimeError(f"template is missing configured style: {name}")
+
+
 def iter_table_paragraphs(table):
     for row in table.rows:
         for cell in row.cells:
@@ -157,8 +164,23 @@ def usable_width_twips(doc, configured_max: int) -> int:
     return min([configured_max, *widths]) if widths else configured_max
 
 
-def style_font_slots(style, rules: dict) -> tuple[str, str]:
-    """Resolve East Asian and Western fonts from the paragraph style chain."""
+def document_default_font_slots(doc) -> tuple[str | None, str | None]:
+    root = doc.styles._element
+    rfonts = root.find(
+        qn("w:docDefaults") + "/" +
+        qn("w:rPrDefault") + "/" +
+        qn("w:rPr") + "/" +
+        qn("w:rFonts")
+    )
+    if rfonts is None:
+        return None, None
+    east = rfonts.get(qn("w:eastAsia"))
+    west = rfonts.get(qn("w:ascii")) or rfonts.get(qn("w:hAnsi"))
+    return east, west
+
+
+def style_font_slots(style, doc) -> tuple[str | None, str | None]:
+    """Resolve effective fonts from style inheritance, then document defaults."""
     east = None
     ascii_font = None
     hansi_font = None
@@ -170,21 +192,13 @@ def style_font_slots(style, rules: dict) -> tuple[str, str]:
         rpr = current._element.rPr
         rfonts = rpr.rFonts if rpr is not None else None
         if rfonts is not None:
-            if east is None:
-                east = rfonts.get(qn("w:eastAsia"))
-            if ascii_font is None:
-                ascii_font = rfonts.get(qn("w:ascii"))
-            if hansi_font is None:
-                hansi_font = rfonts.get(qn("w:hAnsi"))
+            east = east or rfonts.get(qn("w:eastAsia"))
+            ascii_font = ascii_font or rfonts.get(qn("w:ascii"))
+            hansi_font = hansi_font or rfonts.get(qn("w:hAnsi"))
         current = current.base_style
 
-    east = east or rules["fonts"]["east_asia_fallback"]
-    west = (
-        ascii_font
-        or hansi_font
-        or rules["fonts"]["western_default"]
-    )
-    return east, west
+    default_east, default_west = document_default_font_slots(doc)
+    return east or default_east, ascii_font or hansi_font or default_west
 
 
 def text_script_kind(char: str) -> str:
@@ -221,6 +235,16 @@ def plain_run_text(run_el):
     return "".join(t.text or "" for t in texts)
 
 
+def direct_run_font_slots(run_el):
+    rpr = run_el.rPr
+    rfonts = rpr.rFonts if rpr is not None else None
+    if rfonts is None:
+        return None, None
+    east = rfonts.get(qn("w:eastAsia"))
+    west = rfonts.get(qn("w:ascii")) or rfonts.get(qn("w:hAnsi"))
+    return east, west
+
+
 def set_explicit_run_fonts(run_el, east_font: str, west_font: str) -> None:
     rpr = run_el.get_or_add_rPr()
     rfonts = rpr.get_or_add_rFonts()
@@ -251,17 +275,14 @@ def replace_run_with_segments(run_el, segments, east_font: str, west_font: str) 
     parent.remove(run_el)
 
 
-def normalize_paragraph_runs(paragraph, rules: dict) -> None:
-    """Split plain text runs by script and make both font slots explicit."""
+def normalize_paragraph_runs(paragraph, doc, rules: dict) -> None:
+    """Split plain mixed-script runs; preserve direct fonts and fill missing slots from styles."""
     try:
         style = paragraph.style
     except (KeyError, ValueError):
         style = None
 
-    east_font, west_font = style_font_slots(style, rules) if style is not None else (
-        rules["fonts"]["east_asia_fallback"],
-        rules["fonts"]["western_default"],
-    )
+    style_east, style_west = style_font_slots(style, doc) if style is not None else document_default_font_slots(doc)
 
     for run in list(paragraph.runs):
         run_el = run._r
@@ -269,10 +290,16 @@ def normalize_paragraph_runs(paragraph, rules: dict) -> None:
         if text is None or not text:
             continue
 
-        segments = split_script_segments(text)
-        if not segments:
-            continue
+        direct_east, direct_west = direct_run_font_slots(run_el)
+        east_font = direct_east or style_east
+        west_font = direct_west or style_west
 
+        if not east_font or not west_font:
+            raise RuntimeError(
+                f"cannot resolve East Asian/Western fonts for paragraph text: {paragraph.text[:60]!r}"
+            )
+
+        segments = split_script_segments(text)
         if rules["fonts"]["split_mixed_runs"] and len(segments) > 1:
             replace_run_with_segments(run_el, segments, east_font, west_font)
         else:
@@ -286,7 +313,7 @@ def normalize_document_runs(doc, rules: dict) -> None:
         if key in seen:
             continue
         seen.add(key)
-        normalize_paragraph_runs(paragraph, rules)
+        normalize_paragraph_runs(paragraph, doc, rules)
 
 
 TBLW_LATER_TAGS = tuple(
@@ -316,9 +343,6 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
     table.autofit = rules["table"]["layout"] != "fixed"
 
     tbl_pr = table._tbl.tblPr
-    tbl_w = ensure_tbl_width(tbl_pr)
-    tbl_w.set(qn("w:type"), "dxa")
-    tbl_w.set(qn("w:w"), str(max_width))
 
     tbl_ind = tbl_pr.find(qn("w:tblInd"))
     if tbl_ind is not None:
@@ -337,6 +361,20 @@ def normalize_table(table, table_style, rules: dict, max_width: int) -> None:
             widths.append(0)
 
     total = sum(widths)
+
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    preferred_too_wide = False
+    if tbl_w is not None and tbl_w.get(qn("w:type")) == "dxa":
+        try:
+            preferred_too_wide = int(tbl_w.get(qn("w:w")) or "0") > max_width
+        except ValueError:
+            preferred_too_wide = True
+
+    if total > max_width or preferred_too_wide:
+        tbl_w = ensure_tbl_width(tbl_pr)
+        tbl_w.set(qn("w:type"), "dxa")
+        tbl_w.set(qn("w:w"), str(max_width))
+
     if widths and total > max_width and total > 0:
         scaled = []
         used = 0
@@ -494,6 +532,9 @@ def format_document(src: Path, dst: Path, rules: dict, groups: set[str]) -> None
 
     body_name = rules["body"]["style"]
     body_style = None
+
+    if "styles" in groups:
+        sync_template_styles(doc, template, rules)
 
     if "body" in groups:
         body_style = copy_style_format(doc, template, body_name)

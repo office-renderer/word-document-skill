@@ -94,7 +94,7 @@ def default_paragraph_style_id(styles: ET.Element) -> str | None:
     return None
 
 
-def style_font_slots(style_id, styles, by_id, rules):
+def style_font_slots(style_id, styles, by_id):
     east = None
     ascii_font = None
     hansi_font = None
@@ -106,12 +106,9 @@ def style_font_slots(style_id, styles, by_id, rules):
         style = by_id[sid]
         rfonts = style.find("w:rPr/w:rFonts", NS)
         if rfonts is not None:
-            if east is None:
-                east = w_attr(rfonts, "eastAsia")
-            if ascii_font is None:
-                ascii_font = w_attr(rfonts, "ascii")
-            if hansi_font is None:
-                hansi_font = w_attr(rfonts, "hAnsi")
+            east = east or w_attr(rfonts, "eastAsia")
+            ascii_font = ascii_font or w_attr(rfonts, "ascii")
+            hansi_font = hansi_font or w_attr(rfonts, "hAnsi")
         sid = w_attr(style.find("w:basedOn", NS), "val")
 
     defaults = styles.find("w:docDefaults/w:rPrDefault/w:rPr/w:rFonts", NS)
@@ -120,9 +117,20 @@ def style_font_slots(style_id, styles, by_id, rules):
         ascii_font = ascii_font or w_attr(defaults, "ascii")
         hansi_font = hansi_font or w_attr(defaults, "hAnsi")
 
+    return east, ascii_font or hansi_font
+
+
+def style_format_signature(style, by_id):
+    based_id = w_attr(style.find("w:basedOn", NS), "val")
+    based_name = None
+    if based_id and based_id in by_id:
+        based_name = w_attr(by_id[based_id].find("w:name", NS), "val")
+    ppr = style.find("w:pPr", NS)
+    rpr = style.find("w:rPr", NS)
     return (
-        east or rules["fonts"]["east_asia_fallback"],
-        ascii_font or hansi_font or rules["fonts"]["western_default"],
+        based_name,
+        ET.tostring(ppr, encoding="unicode") if ppr is not None else "",
+        ET.tostring(rpr, encoding="unicode") if rpr is not None else "",
     )
 
 
@@ -148,17 +156,8 @@ def script_flags(text: str) -> tuple[bool, bool]:
     return east, west
 
 
-def font_issues_for_paragraph(
-    p,
-    paragraph_index,
-    location,
-    styles,
-    by_id,
-    rules,
-):
+def font_issues_for_paragraph(p, paragraph_index, location, rules):
     result = []
-    style_id = paragraph_style_id(p)
-    east_font, west_font = style_font_slots(style_id, styles, by_id, rules)
 
     for run_index, run in enumerate(p.findall("w:r", NS), 1):
         text = plain_run_text(run)
@@ -182,34 +181,29 @@ def font_issues_for_paragraph(
         rpr = run.find("w:rPr", NS)
         rfonts = rpr.find("w:rFonts", NS) if rpr is not None else None
 
-        if has_east:
-            actual = w_attr(rfonts, "eastAsia")
-            if actual != east_font:
-                result.append(issue(
-                    "FONT-EAST-ASIA",
-                    f"{location} paragraph {paragraph_index} run {run_index} should use East Asian font {east_font!r}",
-                    "font",
-                    location=location,
-                    paragraph=paragraph_index,
-                    run=run_index,
-                    expected=east_font,
-                    actual=actual,
-                ))
+        if has_east and not w_attr(rfonts, "eastAsia"):
+            result.append(issue(
+                "FONT-EAST-ASIA-MISSING",
+                f"{location} paragraph {paragraph_index} run {run_index} has no explicit East Asian font",
+                "font",
+                location=location,
+                paragraph=paragraph_index,
+                run=run_index,
+            ))
 
         if has_west:
-            actual_ascii = w_attr(rfonts, "ascii")
-            actual_hansi = w_attr(rfonts, "hAnsi")
-            if actual_ascii != west_font or actual_hansi != west_font:
+            ascii_font = w_attr(rfonts, "ascii")
+            hansi_font = w_attr(rfonts, "hAnsi")
+            if not ascii_font or not hansi_font:
                 result.append(issue(
-                    "FONT-WESTERN",
-                    f"{location} paragraph {paragraph_index} run {run_index} should use Western font {west_font!r}",
+                    "FONT-WESTERN-MISSING",
+                    f"{location} paragraph {paragraph_index} run {run_index} has incomplete Western font slots",
                     "font",
                     location=location,
                     paragraph=paragraph_index,
                     run=run_index,
-                    expected=west_font,
-                    ascii=actual_ascii,
-                    hAnsi=actual_hansi,
+                    ascii=ascii_font,
+                    hAnsi=hansi_font,
                 ))
 
     return result
@@ -343,6 +337,33 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
 
     ref_document = template.xml("word/document.xml")
     ref_settings = template.xml("word/settings.xml")
+    ref_styles = template.xml("word/styles.xml")
+    ref_by_id, ref_by_name = style_catalog(ref_styles)
+
+    for name in rules["styles"]["sync_from_template"]:
+        target_style = by_name.get(name)
+        ref_style = ref_by_name.get(name)
+        if ref_style is None:
+            issues.append(issue(
+                "STY-TEMPLATE-MISSING",
+                f"Configured style {name!r} is missing from the template",
+            ))
+            continue
+        if target_style is None:
+            issues.append(issue(
+                "STY-MISSING",
+                f"Required template style is missing: {name}",
+                "styles",
+                style=name,
+            ))
+            continue
+        if style_format_signature(target_style, by_id) != style_format_signature(ref_style, ref_by_id):
+            issues.append(issue(
+                "STY-MISMATCH",
+                f"Style differs from template: {name}",
+                "styles",
+                style=name,
+            ))
 
     theme_lang = settings.find("w:themeFontLang", NS)
     expected_east_asia = rules["language"]["theme_font_east_asia"]
@@ -444,7 +465,7 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
 
         for idx, p in enumerate(direct_paragraphs, 1):
             issues.extend(font_issues_for_paragraph(
-                p, idx, "body", styles, by_id, rules
+                p, idx, "body", rules
             ))
 
     max_width = int(rules["table"]["max_width_twips"])
@@ -456,9 +477,7 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
         layout = tblpr.find("w:tblLayout", NS) if tblpr is not None else None
         tblind = tblpr.find("w:tblInd", NS) if tblpr is not None else None
 
-        if w_attr(tblw, "type") != "dxa":
-            issues.append(issue("TBL-WIDTH-TYPE", f"Table {t_idx} width type is not dxa", "table", table=t_idx))
-        else:
+        if tblw is not None and w_attr(tblw, "type") == "dxa":
             try:
                 if int(w_attr(tblw, "w") or "0") > max_width:
                     issues.append(issue("TBL-WIDTH", f"Table {t_idx} exceeds {max_width} twips", "table", table=t_idx))
@@ -520,8 +539,6 @@ def quick_issues(target: Package, template: Package, rules: dict) -> tuple[list[
                     p,
                     p_idx,
                     f"table {t_idx} cell {c_idx}",
-                    styles,
-                    by_id,
                     rules,
                 ))
 
